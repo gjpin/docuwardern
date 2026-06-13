@@ -128,6 +128,32 @@ Failed pages or missing content selectors mark the artifact incomplete and
 produce a nonzero exit code, while successful documents and diagnostics remain
 on disk.
 
+## `retry`
+
+```text
+docuwarden retry <artifact-dir> [flags]
+```
+
+Retries every failed and selector-missing URL in an existing artifact. Existing
+documents are preserved, repaired pages may discover new in-scope pages, and the
+artifact is updated atomically in place. Retry does not index or publish the
+artifact.
+
+`--content-selector` and `--link-selector` are repeatable additions to the
+selectors stored in the artifact. Content selectors are tried in stored order,
+using the first match. The crawl flags `--workers`, `--throttle`,
+`--request-timeout`, `--retries`, and `--retry-backoff` override the stored
+settings only when explicitly supplied.
+
+The command exits nonzero while any failed or selector-missing pages remain. A
+complete artifact is a successful no-op.
+
+```sh
+docuwarden retry artifacts/nuxt/4.x \
+  --content-selector 'article.docs-content' \
+  --link-selector '.docs-navigation a'
+```
+
 ### Examples
 
 Scrape one page:

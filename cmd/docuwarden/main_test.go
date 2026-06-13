@@ -9,7 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/zero/docuwarden/corpus"
 	"github.com/zero/docuwarden/embedding"
 	"github.com/zero/docuwarden/rerank"
 	"github.com/zero/docuwarden/vectorstore"
@@ -40,6 +42,42 @@ func TestScrapeCommandCreatesArtifact(t *testing.T) {
 		if !strings.Contains(stderr.String(), expected) {
 			t.Fatalf("stderr missing %q: %s", expected, stderr.String())
 		}
+	}
+}
+
+func TestRetryCommandUsesRepeatedSelectorsAndOverrides(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<article>repaired</article>`)
+	}))
+	defer server.Close()
+	dir := filepath.Join(t.TempDir(), "artifact")
+	artifact := corpus.Artifact{Manifest: corpus.Manifest{SchemaVersion: corpus.SchemaVersion, Source: corpus.SourceSpec{SourceID: "docs", SeedURL: server.URL, ContentSelector: "main"}, Crawl: corpus.CrawlSettings{Workers: 1, Timeout: time.Second, Backoff: time.Millisecond}}, Report: corpus.Report{SelectorMissing: []corpus.PageEvent{{URL: server.URL}}}, Markdown: map[string]string{}}
+	if err := corpus.Write(dir, artifact); err != nil {
+		t.Fatal(err)
+	}
+	command := newRoot(&bytes.Buffer{}, &bytes.Buffer{})
+	command.SetArgs([]string{"retry", dir, "--content-selector", "article", "--content-selector", "article", "--link-selector", ".links", "--link-selector", ".links", "--workers", "2", "--retries", "0", "--throttle", "0"})
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	result, err := corpus.Read(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Manifest.Complete || result.Manifest.Crawl.Workers != 2 || result.Manifest.Crawl.MaxRetries != 0 || result.Manifest.Crawl.Throttle != 0 {
+		t.Fatalf("manifest = %+v", result.Manifest)
+	}
+	if len(result.Manifest.Source.ContentSelectors) != 1 || len(result.Manifest.Source.LinkSelectors) != 1 {
+		t.Fatalf("source = %+v", result.Manifest.Source)
+	}
+}
+
+func TestRetryCommandRejectsInvalidArtifact(t *testing.T) {
+	command := newRoot(&bytes.Buffer{}, &bytes.Buffer{})
+	command.SetArgs([]string{"retry", t.TempDir()})
+	if err := command.Execute(); err == nil {
+		t.Fatal("expected invalid artifact error")
 	}
 }
 

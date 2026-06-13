@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -34,8 +35,186 @@ type IndexOptions struct {
 	EmbeddingModel  string
 }
 
+type RetryOptions struct {
+	ContentSelectors []string
+	LinkSelectors    []string
+	Workers          int
+	WorkersSet       bool
+	Throttle         time.Duration
+	ThrottleSet      bool
+	Timeout          time.Duration
+	TimeoutSet       bool
+	MaxRetries       int
+	MaxRetriesSet    bool
+	Backoff          time.Duration
+	BackoffSet       bool
+	HTTPClient       *http.Client
+	Now              func() time.Time
+	Sleep            func(context.Context, time.Duration) error
+	Progress         func(string, ...any)
+}
+
 func Scrape(ctx context.Context, cfg scrape.Config, output string) (corpus.Artifact, error) {
 	return scrapeArtifact(ctx, cfg, output, cfg.Progress)
+}
+
+func Retry(ctx context.Context, artifactDir string, options RetryOptions) (corpus.Artifact, error) {
+	artifact, err := corpus.Read(artifactDir)
+	if err != nil {
+		return corpus.Artifact{}, err
+	}
+	if artifact.Manifest.Complete {
+		return artifact, nil
+	}
+
+	source := artifact.Manifest.Source
+	source.ContentSelectors = appendUniqueExcluding(source.ContentSelectors, source.ContentSelector, options.ContentSelectors...)
+	source.LinkSelectors = appendUnique(source.LinkSelectors, options.LinkSelectors...)
+	settings := artifact.Manifest.Crawl
+	if settings.Workers <= 0 {
+		settings.Workers = 4
+	}
+	if settings.Timeout <= 0 {
+		settings.Timeout = 20 * time.Second
+	}
+	if settings.Backoff <= 0 {
+		settings.Backoff = 200 * time.Millisecond
+	}
+	if artifact.Manifest.Crawl == (corpus.CrawlSettings{}) {
+		settings.Throttle = 100 * time.Millisecond
+		settings.MaxRetries = 3
+	}
+	if options.WorkersSet {
+		settings.Workers = options.Workers
+	}
+	if options.ThrottleSet {
+		settings.Throttle = options.Throttle
+	}
+	if options.TimeoutSet {
+		settings.Timeout = options.Timeout
+	}
+	if options.MaxRetriesSet {
+		settings.MaxRetries = options.MaxRetries
+	}
+	if options.BackoffSet {
+		settings.Backoff = options.Backoff
+	}
+	if settings.Workers <= 0 || settings.MaxRetries < 0 {
+		return artifact, errors.New("workers must be positive and retries non-negative")
+	}
+
+	initial := incompleteURLs(artifact.Report)
+	known := make([]string, len(artifact.Manifest.Documents))
+	for i, document := range artifact.Manifest.Documents {
+		known[i] = document.URL
+	}
+	cfg := scrape.Config{Source: source, Workers: settings.Workers, Throttle: settings.Throttle, Timeout: settings.Timeout, MaxRetries: settings.MaxRetries, Backoff: settings.Backoff, HTTPClient: options.HTTPClient, Now: options.Now, Sleep: options.Sleep, Progress: options.Progress}
+	retried, crawlErr := scrape.CrawlTargets(ctx, cfg, initial, known)
+	if retried.Manifest.SchemaVersion == 0 {
+		return artifact, crawlErr
+	}
+	merged := mergeRetry(artifact, retried, initial)
+	merged.Manifest.Source = source
+	merged.Manifest.Crawl = retried.Manifest.Crawl
+	merged.Manifest.CompletedAt = retried.Manifest.CompletedAt
+	merged.Manifest.Complete = len(merged.Report.Failed) == 0 && len(merged.Report.SelectorMissing) == 0
+	corpus.Sort(&merged)
+	if err := corpus.Write(artifactDir, merged); err != nil {
+		return merged, errors.Join(crawlErr, err)
+	}
+	if !merged.Manifest.Complete {
+		return merged, &scrape.CrawlError{Artifact: merged}
+	}
+	return merged, nil
+}
+
+func appendUnique(existing []string, additions ...string) []string {
+	seen := make(map[string]bool, len(existing)+len(additions))
+	result := make([]string, 0, len(existing)+len(additions))
+	for _, value := range append(append([]string(nil), existing...), additions...) {
+		if value != "" && !seen[value] {
+			seen[value] = true
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func appendUniqueExcluding(existing []string, excluded string, additions ...string) []string {
+	seen := map[string]bool{excluded: true}
+	result := make([]string, 0, len(existing)+len(additions))
+	for _, value := range append(append([]string(nil), existing...), additions...) {
+		if value != "" && !seen[value] {
+			seen[value] = true
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func incompleteURLs(report corpus.Report) []string {
+	seen := map[string]bool{}
+	var urls []string
+	for _, event := range append(append([]corpus.PageEvent(nil), report.Failed...), report.SelectorMissing...) {
+		if !seen[event.URL] {
+			seen[event.URL] = true
+			urls = append(urls, event.URL)
+		}
+	}
+	return urls
+}
+
+func mergeRetry(existing, retried corpus.Artifact, initial []string) corpus.Artifact {
+	targeted := map[string]bool{}
+	for _, pageURL := range initial {
+		targeted[pageURL] = true
+	}
+	existing.Report.Failed = removeEvents(existing.Report.Failed, targeted)
+	existing.Report.SelectorMissing = removeEvents(existing.Report.SelectorMissing, targeted)
+	existing.Report.Fetched = mergeEvents(existing.Report.Fetched, retried.Report.Fetched)
+	existing.Report.Redirected = mergeEvents(existing.Report.Redirected, retried.Report.Redirected)
+	existing.Report.Skipped = mergeEvents(existing.Report.Skipped, retried.Report.Skipped)
+	existing.Report.Failed = mergeEvents(existing.Report.Failed, retried.Report.Failed)
+	existing.Report.SelectorMissing = mergeEvents(existing.Report.SelectorMissing, retried.Report.SelectorMissing)
+
+	byURL := make(map[string]int, len(existing.Manifest.Documents))
+	for i, document := range existing.Manifest.Documents {
+		byURL[document.URL] = i
+	}
+	for _, document := range retried.Manifest.Documents {
+		if index, ok := byURL[document.URL]; ok {
+			delete(existing.Markdown, existing.Manifest.Documents[index].ID)
+			existing.Manifest.Documents[index] = document
+		} else {
+			byURL[document.URL] = len(existing.Manifest.Documents)
+			existing.Manifest.Documents = append(existing.Manifest.Documents, document)
+		}
+		existing.Markdown[document.ID] = retried.Markdown[document.ID]
+	}
+	return existing
+}
+
+func removeEvents(events []corpus.PageEvent, removed map[string]bool) []corpus.PageEvent {
+	result := events[:0]
+	for _, event := range events {
+		if !removed[event.URL] {
+			result = append(result, event)
+		}
+	}
+	return result
+}
+
+func mergeEvents(existing, additions []corpus.PageEvent) []corpus.PageEvent {
+	seen := map[string]bool{}
+	result := make([]corpus.PageEvent, 0, len(existing)+len(additions))
+	for _, event := range append(append([]corpus.PageEvent(nil), existing...), additions...) {
+		key := fmt.Sprintf("%s\x00%d\x00%s\x00%s", event.URL, event.StatusCode, event.Detail, event.Target)
+		if !seen[key] {
+			seen[key] = true
+			result = append(result, event)
+		}
+	}
+	return result
 }
 
 func scrapeArtifact(ctx context.Context, cfg scrape.Config, output string, progress func(string, ...any)) (corpus.Artifact, error) {

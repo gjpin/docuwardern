@@ -73,11 +73,19 @@ func (err *outsideScopeRedirectError) Error() string {
 }
 
 func Crawl(ctx context.Context, cfg Config) (corpus.Artifact, error) {
+	return CrawlTargets(ctx, cfg, nil, nil)
+}
+
+// CrawlTargets crawls initial URLs and any links they discover, without
+// refetching canonical URLs already represented by successful documents.
+func CrawlTargets(ctx context.Context, cfg Config, initialURLs, knownSuccessfulURLs []string) (corpus.Artifact, error) {
 	if cfg.Source.SourceID == "" || cfg.Source.SeedURL == "" || cfg.Source.ContentSelector == "" {
 		return corpus.Artifact{}, errors.New("source ID, seed URL, and content selector are required")
 	}
-	if _, err := cascadia.Parse(cfg.Source.ContentSelector); err != nil {
-		return corpus.Artifact{}, fmt.Errorf("invalid content selector: %w", err)
+	for _, selector := range contentSelectors(cfg.Source) {
+		if _, err := cascadia.Parse(selector); err != nil {
+			return corpus.Artifact{}, fmt.Errorf("invalid content selector %q: %w", selector, err)
+		}
 	}
 	for _, selector := range cfg.Source.LinkSelectors {
 		if _, err := cascadia.Parse(selector); err != nil {
@@ -92,10 +100,36 @@ func Crawl(ctx context.Context, cfg Config) (corpus.Artifact, error) {
 	defaults(&cfg)
 	c := &crawler{cfg: cfg, scope: scope, client: cfg.HTTPClient, lastFetch: map[string]time.Time{}}
 	started := cfg.Now().UTC()
-	artifact := corpus.Artifact{Manifest: corpus.Manifest{SchemaVersion: corpus.SchemaVersion, Source: cfg.Source, StartedAt: started}, Markdown: map[string]string{}}
-	seen := map[string]bool{seed: true}
+	artifact := corpus.Artifact{Manifest: corpus.Manifest{SchemaVersion: corpus.SchemaVersion, Source: cfg.Source, StartedAt: started, Crawl: settings(cfg)}, Markdown: map[string]string{}}
+	seen := map[string]bool{}
 	documented := map[string]bool{}
-	queue := []string{seed}
+	for _, rawURL := range knownSuccessfulURLs {
+		canonical, accepted, resolveErr := scope.Resolve(seed, rawURL)
+		if resolveErr == nil && accepted {
+			seen[canonical] = true
+			documented[canonical] = true
+		}
+	}
+	if len(initialURLs) == 0 {
+		initialURLs = []string{seed}
+	}
+	var queue []string
+	queued := map[string]bool{}
+	for _, rawURL := range initialURLs {
+		canonical, accepted, resolveErr := scope.Resolve(seed, rawURL)
+		if resolveErr != nil {
+			return corpus.Artifact{}, fmt.Errorf("invalid initial URL %q: %w", rawURL, resolveErr)
+		}
+		if !accepted {
+			return corpus.Artifact{}, fmt.Errorf("initial URL outside seed scope: %s", rawURL)
+		}
+		if !queued[canonical] {
+			queued[canonical] = true
+			seen[canonical] = true
+			queue = append(queue, canonical)
+		}
+	}
+	sort.Strings(queue)
 	processed := 0
 	lastProgressBucket := -1
 	for len(queue) > 0 {
@@ -147,6 +181,16 @@ func Crawl(ctx context.Context, cfg Config) (corpus.Artifact, error) {
 		return artifact, &CrawlError{Artifact: artifact}
 	}
 	return artifact, nil
+}
+
+func settings(cfg Config) corpus.CrawlSettings {
+	return corpus.CrawlSettings{Workers: cfg.Workers, Throttle: cfg.Throttle, Timeout: cfg.Timeout, MaxRetries: cfg.MaxRetries, Backoff: cfg.Backoff}
+}
+
+func contentSelectors(source corpus.SourceSpec) []string {
+	selectors := []string{source.ContentSelector}
+	selectors = append(selectors, source.ContentSelectors...)
+	return selectors
 }
 
 func defaults(cfg *Config) {
@@ -273,8 +317,15 @@ func (c *crawler) fetchPage(ctx context.Context, pageURL string) pageResult {
 		return result
 	}
 	result.title = strings.TrimSpace(doc.Find("title").First().Text())
-	selection := doc.Find(c.cfg.Source.ContentSelector).First()
-	if selection.Length() == 0 {
+	var selection *goquery.Selection
+	for _, selector := range contentSelectors(c.cfg.Source) {
+		candidate := doc.Find(selector).First()
+		if candidate.Length() > 0 {
+			selection = candidate
+			break
+		}
+	}
+	if selection == nil {
 		result.missing = true
 		return result
 	}

@@ -1,6 +1,7 @@
 package corpus
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -19,6 +20,28 @@ func TestArtifactRoundTrip(t *testing.T) {
 	}
 	if read.Markdown[id] != body || read.Manifest.Documents[0].ID != id {
 		t.Fatalf("round trip mismatch: %+v", read)
+	}
+}
+
+func TestFailedWritePreservesExistingArtifact(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "artifact")
+	body := "original"
+	id := DocumentID("source", "", "https://example.com/docs")
+	original := Artifact{Manifest: Manifest{SchemaVersion: SchemaVersion, Source: SourceSpec{SourceID: "source", SeedURL: "https://example.com/docs", ContentSelector: "main"}, Complete: true, Documents: []Document{{ID: id, URL: "https://example.com/docs", Filename: "documents/" + FilenameFor(id), ContentHash: HashString(body)}}}, Markdown: map[string]string{id: body}}
+	if err := Write(dir, original); err != nil {
+		t.Fatal(err)
+	}
+	broken := original
+	broken.Markdown = map[string]string{}
+	if err := Write(dir, broken); err == nil {
+		t.Fatal("expected failed write")
+	}
+	read, err := Read(dir)
+	if err != nil {
+		t.Fatalf("original artifact damaged: %v", err)
+	}
+	if read.Markdown[id] != body {
+		t.Fatalf("body = %q", read.Markdown[id])
 	}
 }
 

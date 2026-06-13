@@ -16,14 +16,23 @@ import (
 const SchemaVersion = 1
 
 type SourceSpec struct {
-	SourceID        string   `json:"source_id"`
-	DisplayName     string   `json:"display_name,omitempty"`
-	Description     string   `json:"description,omitempty"`
-	Tags            []string `json:"tags,omitempty"`
-	SeedURL         string   `json:"seed_url"`
-	LinkSelectors   []string `json:"link_selectors,omitempty"`
-	ContentSelector string   `json:"content_selector"`
-	Version         string   `json:"version,omitempty"`
+	SourceID         string   `json:"source_id"`
+	DisplayName      string   `json:"display_name,omitempty"`
+	Description      string   `json:"description,omitempty"`
+	Tags             []string `json:"tags,omitempty"`
+	SeedURL          string   `json:"seed_url"`
+	LinkSelectors    []string `json:"link_selectors,omitempty"`
+	ContentSelector  string   `json:"content_selector"`
+	ContentSelectors []string `json:"content_selectors,omitempty"`
+	Version          string   `json:"version,omitempty"`
+}
+
+type CrawlSettings struct {
+	Workers    int           `json:"workers,omitempty"`
+	Throttle   time.Duration `json:"throttle,omitempty"`
+	Timeout    time.Duration `json:"timeout,omitempty"`
+	MaxRetries int           `json:"max_retries,omitempty"`
+	Backoff    time.Duration `json:"backoff,omitempty"`
 }
 
 type Document struct {
@@ -36,12 +45,13 @@ type Document struct {
 }
 
 type Manifest struct {
-	SchemaVersion int        `json:"schema_version"`
-	Source        SourceSpec `json:"source"`
-	StartedAt     time.Time  `json:"started_at"`
-	CompletedAt   time.Time  `json:"completed_at"`
-	Complete      bool       `json:"complete"`
-	Documents     []Document `json:"documents"`
+	SchemaVersion int           `json:"schema_version"`
+	Source        SourceSpec    `json:"source"`
+	StartedAt     time.Time     `json:"started_at"`
+	CompletedAt   time.Time     `json:"completed_at"`
+	Complete      bool          `json:"complete"`
+	Crawl         CrawlSettings `json:"crawl,omitempty"`
+	Documents     []Document    `json:"documents"`
 }
 
 type PageEvent struct {
@@ -80,10 +90,41 @@ func Write(dir string, artifact Artifact) error {
 	if dir == "" {
 		return errors.New("artifact output directory is required")
 	}
-	documentsDir := filepath.Join(dir, "documents")
-	if err := os.RemoveAll(documentsDir); err != nil {
-		return fmt.Errorf("clean artifact documents: %w", err)
+	parent := filepath.Dir(filepath.Clean(dir))
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return fmt.Errorf("create artifact parent: %w", err)
 	}
+	temp, err := os.MkdirTemp(parent, ".docuwarden-artifact-")
+	if err != nil {
+		return fmt.Errorf("create temporary artifact: %w", err)
+	}
+	defer os.RemoveAll(temp)
+	if err := write(temp, artifact); err != nil {
+		return err
+	}
+
+	backup := temp + ".previous"
+	if _, err := os.Stat(dir); err == nil {
+		if err := os.Rename(dir, backup); err != nil {
+			return fmt.Errorf("preserve existing artifact: %w", err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect existing artifact: %w", err)
+	}
+	if err := os.Rename(temp, dir); err != nil {
+		if restoreErr := os.Rename(backup, dir); restoreErr != nil && !errors.Is(restoreErr, os.ErrNotExist) {
+			return errors.Join(fmt.Errorf("replace artifact: %w", err), fmt.Errorf("restore existing artifact: %w", restoreErr))
+		}
+		return fmt.Errorf("replace artifact: %w", err)
+	}
+	if err := os.RemoveAll(backup); err != nil {
+		return fmt.Errorf("remove previous artifact: %w", err)
+	}
+	return nil
+}
+
+func write(dir string, artifact Artifact) error {
+	documentsDir := filepath.Join(dir, "documents")
 	if err := os.MkdirAll(documentsDir, 0o755); err != nil {
 		return fmt.Errorf("create artifact directory: %w", err)
 	}

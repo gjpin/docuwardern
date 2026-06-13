@@ -60,6 +60,15 @@ export DOCUWARDEN_RERANKER_MODEL=rerank-2.5-lite
 The Voyage API endpoint defaults to `https://api.voyageai.com`. The
 operation-specific Docuwarden API key variables override `VOYAGE_API_KEY`.
 
+Incomplete crawl artifacts can be repaired in place without re-fetching
+successful pages or publishing to Qdrant:
+
+```sh
+docuwarden retry artifacts/nuxt/4.x \
+  --content-selector 'article.docs-content' \
+  --link-selector '.docs-navigation a'
+```
+
 ## Nuxt Quickstart
 
 This example indexes the Nuxt 4.x documentation using Qdrant under Podman and

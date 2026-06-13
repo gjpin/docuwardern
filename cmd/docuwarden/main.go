@@ -69,7 +69,7 @@ func newRoot(stdout, stderr io.Writer) *cobra.Command {
 	root.SetOut(stdout)
 	root.SetErr(stderr)
 	providers.add(root)
-	root.AddCommand(newScrapeCommand(&providers), newIndexCommand(&providers), newIngestCommand(&providers), newSearchCommand(&providers), newSourcesCommand(&providers), newDocumentsCommand(&providers))
+	root.AddCommand(newScrapeCommand(&providers), newRetryCommand(), newIndexCommand(&providers), newIngestCommand(&providers), newSearchCommand(&providers), newSourcesCommand(&providers), newDocumentsCommand(&providers))
 	return root
 }
 
@@ -99,6 +99,39 @@ func newScrapeCommand(providers *providerFlags) *cobra.Command {
 		return err
 	}}
 	flags.add(command)
+	return command
+}
+
+func newRetryCommand() *cobra.Command {
+	var contentSelectors, linkSelectors []string
+	var workers, retries int
+	var throttle, requestTimeout, backoff time.Duration
+	command := &cobra.Command{Use: "retry <artifact-dir>", Args: cobra.ExactArgs(1), RunE: func(command *cobra.Command, args []string) error {
+		options := app.RetryOptions{
+			ContentSelectors: contentSelectors,
+			LinkSelectors:    linkSelectors,
+			Workers:          workers,
+			WorkersSet:       command.Flags().Changed("workers"),
+			Throttle:         throttle,
+			ThrottleSet:      command.Flags().Changed("throttle"),
+			Timeout:          requestTimeout,
+			TimeoutSet:       command.Flags().Changed("request-timeout"),
+			MaxRetries:       retries,
+			MaxRetriesSet:    command.Flags().Changed("retries"),
+			Backoff:          backoff,
+			BackoffSet:       command.Flags().Changed("retry-backoff"),
+			Progress:         progressWriter(command.ErrOrStderr()),
+		}
+		_, err := app.Retry(command.Context(), args[0], options)
+		return err
+	}}
+	command.Flags().StringSliceVar(&contentSelectors, "content-selector", nil, "repeatable fallback CSS selector for page content")
+	command.Flags().StringSliceVar(&linkSelectors, "link-selector", nil, "repeatable CSS selector for crawl links")
+	command.Flags().IntVar(&workers, "workers", 4, "concurrent crawl workers")
+	command.Flags().DurationVar(&throttle, "throttle", 100*time.Millisecond, "minimum delay between requests to one host")
+	command.Flags().DurationVar(&requestTimeout, "request-timeout", 20*time.Second, "HTTP request timeout")
+	command.Flags().IntVar(&retries, "retries", 3, "transient request retries")
+	command.Flags().DurationVar(&backoff, "retry-backoff", 200*time.Millisecond, "initial retry backoff")
 	return command
 }
 
