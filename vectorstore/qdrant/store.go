@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 	"time"
@@ -59,6 +60,13 @@ func (s *Store) ReplaceSnapshot(ctx context.Context, snapshot vectorstore.Snapsh
 		}
 	}
 	physical := physicalName(snapshot.Source, snapshot.Version)
+	metadata := map[string]any{
+		"docuwarden_schema": indexSchemaVersion, "source": snapshot.Source, "version": snapshot.Version,
+		"display_name": snapshot.DisplayName, "description": snapshot.Description, "tags": anyStrings(snapshot.Tags),
+		"seed_url": snapshot.SeedURL, "document_count": snapshot.DocumentCount, "chunk_count": len(snapshot.Points),
+		"complete": snapshot.Complete, "indexed_at": snapshot.IndexedAt.UTC().Format(time.RFC3339Nano),
+		"embedding_model": snapshot.EmbeddingModel,
+	}
 	if err := s.client.CreateCollection(ctx, &qdrant.CreateCollection{
 		CollectionName: physical,
 		VectorsConfig: qdrant.NewVectorsConfigMap(map[string]*qdrant.VectorParams{
@@ -67,7 +75,7 @@ func (s *Store) ReplaceSnapshot(ctx context.Context, snapshot vectorstore.Snapsh
 		SparseVectorsConfig: qdrant.NewSparseVectorsConfig(map[string]*qdrant.SparseVectorParams{
 			sparseVectorName: {Modifier: qdrant.Modifier_Idf.Enum()},
 		}),
-		Metadata: qdrant.NewValueMap(map[string]any{"docuwarden_schema": indexSchemaVersion, "source": snapshot.Source, "version": snapshot.Version}),
+		Metadata: qdrant.NewValueMap(metadata),
 	}); err != nil {
 		return fmt.Errorf("create Qdrant collection: %w", err)
 	}
@@ -144,6 +152,119 @@ func (s *Store) ReplaceSnapshot(ctx context.Context, snapshot vectorstore.Snapsh
 	// Publication is already atomic and successful; stale-snapshot cleanup is best effort.
 	_ = s.cleanup(ctx, snapshot.Source, retention)
 	return nil
+}
+
+func (s *Store) ListSources(ctx context.Context) (vectorstore.Catalog, error) {
+	aliases, err := s.client.ListAliases(ctx)
+	if err != nil {
+		return vectorstore.Catalog{}, fmt.Errorf("list Qdrant aliases: %w", err)
+	}
+	byCollection := map[string][]string{}
+	for _, alias := range aliases {
+		byCollection[alias.GetCollectionName()] = append(byCollection[alias.GetCollectionName()], alias.GetAliasName())
+	}
+	bySource := map[string]*vectorstore.CatalogSource{}
+	collections := make([]string, 0, len(byCollection))
+	for collection := range byCollection {
+		collections = append(collections, collection)
+	}
+	sort.Strings(collections)
+	for _, collection := range collections {
+		names := byCollection[collection]
+		info, err := s.client.GetCollectionInfo(ctx, collection)
+		if err != nil {
+			return vectorstore.Catalog{}, fmt.Errorf("inspect Qdrant collection %s: %w", collection, err)
+		}
+		metadata := info.GetConfig().GetMetadata()
+		source := stringValue(metadata, "source")
+		if source == "" || integerValue(metadata, "docuwarden_schema") == 0 {
+			continue
+		}
+		version := stringValue(metadata, "version")
+		isDefault := false
+		for _, name := range names {
+			if name == aliasName(source, "") {
+				isDefault = true
+			}
+		}
+		entry := bySource[source]
+		if entry == nil {
+			entry = &vectorstore.CatalogSource{Source: source, DisplayName: stringValue(metadata, "display_name"), Description: stringValue(metadata, "description"), Tags: listValue(metadata, "tags")}
+			bySource[source] = entry
+		}
+		if isDefault {
+			entry.DefaultVersion = version
+			entry.DisplayName = stringValue(metadata, "display_name")
+			entry.Description = stringValue(metadata, "description")
+			entry.Tags = listValue(metadata, "tags")
+		}
+		entry.Versions = append(entry.Versions, vectorstore.CatalogVersion{
+			Version: version, SeedURL: stringValue(metadata, "seed_url"), DocumentCount: int(integerValue(metadata, "document_count")),
+			ChunkCount: catalogChunkCount(metadata, info.GetPointsCount()), IndexedAt: stringValue(metadata, "indexed_at"),
+			Complete: boolValue(metadata, "complete"), EmbeddingModel: stringValue(metadata, "embedding_model"),
+		})
+	}
+	catalog := vectorstore.Catalog{SchemaVersion: 1}
+	for _, source := range bySource {
+		sort.Slice(source.Versions, func(i, j int) bool { return source.Versions[i].Version < source.Versions[j].Version })
+		catalog.Sources = append(catalog.Sources, *source)
+	}
+	sort.Slice(catalog.Sources, func(i, j int) bool { return catalog.Sources[i].Source < catalog.Sources[j].Source })
+	return catalog, nil
+}
+
+func (s *Store) ListDocuments(ctx context.Context, source, version string) (vectorstore.DocumentCatalog, error) {
+	if source == "" {
+		return vectorstore.DocumentCatalog{}, errors.New("source is required")
+	}
+	collection := aliasName(source, version)
+	iterator := s.client.ScrollAll(ctx, &qdrant.ScrollPoints{
+		CollectionName: collection, Limit: qdrant.PtrOf(uint32(256)),
+		WithPayload: qdrant.NewWithPayloadInclude("source", "version", "url", "title", "crawled_at"),
+		WithVectors: qdrant.NewWithVectors(false),
+	})
+	documents := map[string]vectorstore.CatalogDocument{}
+	resolvedVersion := version
+	for {
+		points, err := iterator.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return vectorstore.DocumentCatalog{}, fmt.Errorf("list documents from Qdrant: %w", err)
+		}
+		for _, point := range points {
+			payload := point.GetPayload()
+			if resolvedVersion == "" {
+				resolvedVersion = stringValue(payload, "version")
+			}
+			url := stringValue(payload, "url")
+			if url != "" {
+				documents[url] = vectorstore.CatalogDocument{URL: url, Title: stringValue(payload, "title"), CrawledAt: stringValue(payload, "crawled_at")}
+			}
+		}
+	}
+	result := vectorstore.DocumentCatalog{SchemaVersion: 1, Source: source, Version: resolvedVersion}
+	for _, document := range documents {
+		result.Documents = append(result.Documents, document)
+	}
+	sort.Slice(result.Documents, func(i, j int) bool { return result.Documents[i].URL < result.Documents[j].URL })
+	return result, nil
+}
+
+func catalogChunkCount(metadata map[string]*qdrant.Value, fallback uint64) int {
+	if count := integerValue(metadata, "chunk_count"); count > 0 {
+		return int(count)
+	}
+	return int(fallback)
+}
+
+func anyStrings(values []string) []any {
+	result := make([]any, len(values))
+	for i, value := range values {
+		result[i] = value
+	}
+	return result
 }
 
 func (s *Store) Search(ctx context.Context, request vectorstore.SearchRequest) ([]vectorstore.Candidate, error) {
@@ -338,6 +459,12 @@ func integerValue(payload map[string]*qdrant.Value, key string) int64 {
 		return 0
 	}
 	return payload[key].GetIntegerValue()
+}
+func boolValue(payload map[string]*qdrant.Value, key string) bool {
+	if payload[key] == nil {
+		return false
+	}
+	return payload[key].GetBoolValue()
 }
 func listValue(payload map[string]*qdrant.Value, key string) []string {
 	if payload[key] == nil || payload[key].GetListValue() == nil {

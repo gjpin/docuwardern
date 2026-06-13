@@ -63,6 +63,14 @@ func TestCompiledCLIWorkflow(t *testing.T) {
 	run(t, binary, append(base, "ingest", docs.URL+"/docs/v1", "--source", source, "--version", "v1", "--link-selector", "nav a", "--content-selector", "main", "--output", artifact1, "--throttle", "0")...)
 	artifact2 := filepath.Join(t.TempDir(), "v2")
 	run(t, binary, append(base, "ingest", docs.URL+"/docs/v2", "--source", source, "--version", "v2", "--link-selector", "nav a", "--content-selector", "main", "--output", artifact2, "--throttle", "0")...)
+	sourcesJSON := run(t, binary, append(base, "sources", "--format", "json")...)
+	if !strings.Contains(sourcesJSON, `"source": "`+source+`"`) || !strings.Contains(sourcesJSON, `"default_version": "v2"`) || !strings.Contains(sourcesJSON, `"document_count": 3`) {
+		t.Fatalf("sources catalog:\n%s", sourcesJSON)
+	}
+	documentsJSON := run(t, binary, append(base, "documents", "--source", source, "--version", "v2", "--format", "json")...)
+	if !strings.Contains(documentsJSON, `"version": "v2"`) || !strings.Contains(documentsJSON, docs.URL+"/docs/v2/runtime") {
+		t.Fatalf("documents catalog:\n%s", documentsJSON)
+	}
 	defaultJSON := run(t, binary, append(base, "search", "current fast install", "--source", source, "--format", "json")...)
 	if !strings.Contains(defaultJSON, `"version": "v2"`) || !strings.Contains(defaultJSON, "new-install") {
 		t.Fatalf("default search:\n%s", defaultJSON)

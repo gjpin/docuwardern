@@ -45,13 +45,13 @@ func TestIndexBuildsDeterministicSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	id := corpus.DocumentID("docs", "v1", "https://example.com/docs")
 	body := "# Install\n\nRun the command.\n\n## Example\n\n```sh\ngo test ./...\n```\n"
-	artifact := corpus.Artifact{Manifest: corpus.Manifest{SchemaVersion: corpus.SchemaVersion, Source: corpus.SourceSpec{SourceID: "docs", Version: "v1", SeedURL: "https://example.com/docs", ContentSelector: "main"}, Complete: true, Documents: []corpus.Document{{ID: id, URL: "https://example.com/docs", Title: "Docs", Filename: "documents/" + corpus.FilenameFor(id), ContentHash: corpus.HashString(body), CrawledAt: time.Unix(1, 0).UTC()}}}, Markdown: map[string]string{id: body}}
+	artifact := corpus.Artifact{Manifest: corpus.Manifest{SchemaVersion: corpus.SchemaVersion, Source: corpus.SourceSpec{SourceID: "docs", DisplayName: "Example Docs", Description: "Example documentation", Tags: []string{"go"}, Version: "v1", SeedURL: "https://example.com/docs", ContentSelector: "main"}, Complete: true, Documents: []corpus.Document{{ID: id, URL: "https://example.com/docs", Title: "Docs", Filename: "documents/" + corpus.FilenameFor(id), ContentHash: corpus.HashString(body), CrawledAt: time.Unix(1, 0).UTC()}}}, Markdown: map[string]string{id: body}}
 	if err := corpus.Write(dir, artifact); err != nil {
 		t.Fatal(err)
 	}
 	store := &fakeStore{}
 	service := Service{Embedder: fakeEmbedder{}, Store: store}
-	if err := service.Index(context.Background(), dir, IndexOptions{}); err != nil {
+	if err := service.Index(context.Background(), dir, IndexOptions{EmbeddingModel: "example-embed"}); err != nil {
 		t.Fatal(err)
 	}
 	if store.snapshot.Source != "docs" || store.snapshot.Version != "v1" || len(store.snapshot.Points) == 0 {
@@ -60,8 +60,11 @@ func TestIndexBuildsDeterministicSnapshot(t *testing.T) {
 	if len(store.snapshot.Points[0].Sparse.Indices) == 0 {
 		t.Fatal("sparse vector missing")
 	}
+	if store.snapshot.DisplayName != "Example Docs" || store.snapshot.SeedURL != "https://example.com/docs" || store.snapshot.DocumentCount != 1 || !store.snapshot.Complete || store.snapshot.EmbeddingModel != "example-embed" {
+		t.Fatalf("snapshot catalog metadata = %+v", store.snapshot)
+	}
 	firstID := store.snapshot.Points[0].ID
-	if err := service.Index(context.Background(), dir, IndexOptions{}); err != nil {
+	if err := service.Index(context.Background(), dir, IndexOptions{EmbeddingModel: "example-embed"}); err != nil {
 		t.Fatal(err)
 	}
 	if store.snapshot.Points[0].ID != firstID {

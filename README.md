@@ -210,6 +210,17 @@ For the official UI documentation, see
 
 ### 6. Search
 
+Discover the documentation currently available to search:
+
+```sh
+./docuwarden sources --format json
+./docuwarden documents --source nuxt --version 4.x --format json
+```
+
+`sources` reads active Qdrant aliases, so its catalog stays synchronized with
+atomic index publication. New indexes include source metadata, document and
+chunk counts, crawl completeness, indexing time, and the embedding model.
+
 Return a prompt-ready Markdown context bundle:
 
 ```sh

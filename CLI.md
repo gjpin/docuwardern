@@ -13,6 +13,8 @@ The available commands are:
 - `scrape`: crawl documentation and write an artifact.
 - `index`: index an existing artifact in Qdrant.
 - `ingest`: run `scrape` and `index` as one workflow.
+- `sources`: list active indexed documentation sources and versions.
+- `documents`: list indexed pages for a source and version.
 - `search`: retrieve and rerank indexed documentation.
 - `completion`: generate shell completion scripts.
 - `help`: display command help.
@@ -96,6 +98,9 @@ It does not contact embedding, reranking, or Qdrant services.
 | Flag | Default | Required | Description |
 | --- | --- | --- | --- |
 | `--source <id>` | none | yes | Stable source identifier, for example `nuxt`. Used in document IDs and later Qdrant names. |
+| `--display-name <name>` | empty | no | Human-readable source name exposed by `sources`. |
+| `--description <text>` | empty | no | Short source description exposed by `sources`. |
+| `--tag <tag>` | empty | no | Repeatable technology tag exposed by `sources`. |
 | `--version <version>` | empty | no | Version metadata, for example `4.x`. It does not modify the seed URL. |
 | `--content-selector <css>` | none | yes | CSS selector identifying the documentation content. The first match is converted to Markdown. |
 | `--link-selector <css>` | none | no | Repeatable CSS selector identifying links to crawl. Matches from all occurrences are combined. Without this flag only the seed page is scraped. |
@@ -201,6 +206,7 @@ Explicitly publish successful pages from an incomplete artifact:
   --embedding-batch-size 1
 ```
 
+
 ## `ingest`
 
 ```text
@@ -243,6 +249,36 @@ resume without recrawling:
 ./docuwarden index artifacts/nuxt/4.x \
   --embedding-batch-size 1 \
   --provider-timeout 10m
+```
+
+## `sources`
+
+```text
+docuwarden sources [--format json|text]
+```
+
+Lists active Docuwarden indexes from Qdrant. JSON output has a stable
+`schema_version` and `sources` array. Each source contains its source ID,
+optional display metadata and tags, default version, and active versions.
+Version entries include seed URL, document and chunk counts, indexing time,
+crawl completeness, and embedding model when recorded.
+
+```sh
+./docuwarden sources --format json
+```
+
+## `documents`
+
+```text
+docuwarden documents --source <id> [--version <version>] [--format json|text]
+```
+
+Lists the unique indexed pages for one source. Without `--version`, the source
+default alias is used. JSON output includes the resolved version and a stable
+`documents` array containing URL, title, and crawl time.
+
+```sh
+./docuwarden documents --source nuxt --version 4.x --format json
 ```
 
 ## `search`

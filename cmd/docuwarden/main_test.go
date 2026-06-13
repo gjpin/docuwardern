@@ -7,10 +7,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/zero/docuwarden/embedding"
 	"github.com/zero/docuwarden/rerank"
+	"github.com/zero/docuwarden/vectorstore"
 )
 
 func TestScrapeCommandCreatesArtifact(t *testing.T) {
@@ -39,6 +41,38 @@ func TestScrapeCommandCreatesArtifact(t *testing.T) {
 func TestSearchRequiresSourceBeforeConnecting(t *testing.T) {
 	command := newRoot(&bytes.Buffer{}, &bytes.Buffer{})
 	command.SetArgs([]string{"search", "query"})
+	if err := command.Execute(); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestCatalogJSONOutput(t *testing.T) {
+	var output bytes.Buffer
+	catalog := vectorstore.Catalog{SchemaVersion: 1, Sources: []vectorstore.CatalogSource{{Source: "nuxt", DisplayName: "Nuxt", DefaultVersion: "4.x", Versions: []vectorstore.CatalogVersion{{Version: "4.x", DocumentCount: 2, ChunkCount: 7, Complete: true, IndexedAt: "1970-01-01T00:00:01Z"}}}}}
+	if err := writeCatalog(&output, catalog, "json"); err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{`"schema_version": 1`, `"source": "nuxt"`, `"default_version": "4.x"`, `"chunk_count": 7`} {
+		if !strings.Contains(output.String(), expected) {
+			t.Fatalf("catalog output missing %s:\n%s", expected, output.String())
+		}
+	}
+}
+
+func TestDocumentsTextOutput(t *testing.T) {
+	var output bytes.Buffer
+	documents := vectorstore.DocumentCatalog{SchemaVersion: 1, Source: "nuxt", Version: "4.x", Documents: []vectorstore.CatalogDocument{{URL: "https://nuxt.com/docs/4.x/guide", Title: "Guide"}}}
+	if err := writeDocuments(&output, documents, "text"); err != nil {
+		t.Fatal(err)
+	}
+	if output.String() != "Guide\n  https://nuxt.com/docs/4.x/guide\n" {
+		t.Fatalf("documents output = %q", output.String())
+	}
+}
+
+func TestDocumentsRequiresSourceBeforeConnecting(t *testing.T) {
+	command := newRoot(&bytes.Buffer{}, &bytes.Buffer{})
+	command.SetArgs([]string{"documents"})
 	if err := command.Execute(); err == nil {
 		t.Fatal("expected error")
 	}

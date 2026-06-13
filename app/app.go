@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/zero/docuwarden/chunk"
 	"github.com/zero/docuwarden/corpus"
@@ -29,6 +30,7 @@ type IndexOptions struct {
 	BatchSize       int
 	Chunk           chunk.Config
 	Retention       int
+	EmbeddingModel  string
 }
 
 func Scrape(ctx context.Context, cfg scrape.Config, output string) (corpus.Artifact, error) {
@@ -96,7 +98,14 @@ func (service Service) Index(ctx context.Context, artifactDir string, options In
 			points[start+i].DenseVector = vector
 		}
 	}
-	return service.Store.ReplaceSnapshot(ctx, vectorstore.Snapshot{Source: artifact.Manifest.Source.SourceID, Version: artifact.Manifest.Source.Version, Points: points, AllowIncomplete: options.AllowIncomplete, Retention: options.Retention})
+	return service.Store.ReplaceSnapshot(ctx, vectorstore.Snapshot{
+		Source: artifact.Manifest.Source.SourceID, Version: artifact.Manifest.Source.Version,
+		DisplayName: artifact.Manifest.Source.DisplayName, Description: artifact.Manifest.Source.Description,
+		Tags: artifact.Manifest.Source.Tags, SeedURL: artifact.Manifest.Source.SeedURL,
+		DocumentCount: len(artifact.Manifest.Documents), Complete: artifact.Manifest.Complete,
+		IndexedAt: time.Now().UTC(), EmbeddingModel: options.EmbeddingModel,
+		Points: points, AllowIncomplete: options.AllowIncomplete, Retention: options.Retention,
+	})
 }
 
 func indexText(point vectorstore.Point) string {

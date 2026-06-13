@@ -1,0 +1,4 @@
+interface:
+  display_name: "Docuwarden Documentation Search"
+  short_description: "Search indexed technical documentation first"
+  default_prompt: "Use $docuwarden-docs to answer this technical documentation question."

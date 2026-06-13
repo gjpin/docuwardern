@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -39,6 +40,9 @@ type providerFlags struct {
 
 type scrapeFlags struct {
 	source          string
+	displayName     string
+	description     string
+	tags            []string
 	version         string
 	linkSelectors   []string
 	contentSelector string
@@ -65,7 +69,7 @@ func newRoot(stdout, stderr io.Writer) *cobra.Command {
 	root.SetOut(stdout)
 	root.SetErr(stderr)
 	providers.add(root)
-	root.AddCommand(newScrapeCommand(&providers), newIndexCommand(&providers), newIngestCommand(&providers), newSearchCommand(&providers))
+	root.AddCommand(newScrapeCommand(&providers), newIndexCommand(&providers), newIngestCommand(&providers), newSearchCommand(&providers), newSourcesCommand(&providers), newDocumentsCommand(&providers))
 	return root
 }
 
@@ -108,7 +112,7 @@ func newIndexCommand(providers *providerFlags) *cobra.Command {
 			return err
 		}
 		defer closeStore()
-		return service.Index(command.Context(), args[0], app.IndexOptions{AllowIncomplete: allowIncomplete, Retention: retention, BatchSize: batchSize})
+		return service.Index(command.Context(), args[0], app.IndexOptions{AllowIncomplete: allowIncomplete, Retention: retention, BatchSize: batchSize, EmbeddingModel: providers.embeddingModel})
 	}}
 	command.Flags().BoolVar(&allowIncomplete, "allow-incomplete", false, "publish an incomplete crawl artifact")
 	command.Flags().IntVar(&retention, "snapshot-retention", 2, "number of recent physical snapshots to retain")
@@ -129,13 +133,119 @@ func newIngestCommand(providers *providerFlags) *cobra.Command {
 			return err
 		}
 		defer closeStore()
-		return service.Ingest(command.Context(), flags.config(args[0]), flags.outputPath(), app.IndexOptions{AllowIncomplete: allowIncomplete, Retention: retention, BatchSize: batchSize})
+		return service.Ingest(command.Context(), flags.config(args[0]), flags.outputPath(), app.IndexOptions{AllowIncomplete: allowIncomplete, Retention: retention, BatchSize: batchSize, EmbeddingModel: providers.embeddingModel})
 	}}
 	flags.add(command)
 	command.Flags().BoolVar(&allowIncomplete, "allow-incomplete", false, "publish successful pages from an incomplete crawl")
 	command.Flags().IntVar(&retention, "snapshot-retention", 2, "number of recent physical snapshots to retain")
 	command.Flags().IntVar(&batchSize, "embedding-batch-size", 64, "texts per embedding request")
 	return command
+}
+
+func newSourcesCommand(providers *providerFlags) *cobra.Command {
+	var format string
+	command := &cobra.Command{Use: "sources", Short: "List indexed documentation sources and versions", Args: cobra.NoArgs, RunE: func(command *cobra.Command, _ []string) error {
+		if format != "json" && format != "text" {
+			return fmt.Errorf("--format must be json or text")
+		}
+		store, err := providers.store()
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		catalog, err := store.ListSources(command.Context())
+		if err != nil {
+			return err
+		}
+		return writeCatalog(command.OutOrStdout(), catalog, format)
+	}}
+	command.Flags().StringVar(&format, "format", "json", "output format: json or text")
+	return command
+}
+
+func newDocumentsCommand(providers *providerFlags) *cobra.Command {
+	var source, version, format string
+	command := &cobra.Command{Use: "documents", Short: "List indexed pages for a documentation source", Args: cobra.NoArgs, RunE: func(command *cobra.Command, _ []string) error {
+		if source == "" {
+			return fmt.Errorf("--source is required")
+		}
+		if format != "json" && format != "text" {
+			return fmt.Errorf("--format must be json or text")
+		}
+		store, err := providers.store()
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		documents, err := store.ListDocuments(command.Context(), source, version)
+		if err != nil {
+			return err
+		}
+		return writeDocuments(command.OutOrStdout(), documents, format)
+	}}
+	command.Flags().StringVar(&source, "source", "", "source ID")
+	command.Flags().StringVar(&version, "version", "", "exact documentation version")
+	command.Flags().StringVar(&format, "format", "json", "output format: json or text")
+	return command
+}
+
+func writeCatalog(writer io.Writer, catalog vectorstore.Catalog, format string) error {
+	if format == "json" {
+		encoder := json.NewEncoder(writer)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(catalog)
+	}
+	if len(catalog.Sources) == 0 {
+		_, err := fmt.Fprintln(writer, "No indexed documentation sources.")
+		return err
+	}
+	for _, source := range catalog.Sources {
+		name := source.DisplayName
+		if name == "" {
+			name = source.Source
+		}
+		if _, err := fmt.Fprintf(writer, "%s (source: %s)\n", name, source.Source); err != nil {
+			return err
+		}
+		for _, version := range source.Versions {
+			label := version.Version
+			if label == "" {
+				label = "unversioned"
+			}
+			marker := ""
+			if version.Version == source.DefaultVersion {
+				marker = " [default]"
+			}
+			if _, err := fmt.Fprintf(writer, "  %s%s: %d documents, %d chunks\n", label, marker, version.DocumentCount, version.ChunkCount); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func writeDocuments(writer io.Writer, catalog vectorstore.DocumentCatalog, format string) error {
+	if format == "json" {
+		encoder := json.NewEncoder(writer)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(catalog)
+	}
+	if len(catalog.Documents) == 0 {
+		_, err := fmt.Fprintln(writer, "No indexed documents.")
+		return err
+	}
+	for _, document := range catalog.Documents {
+		if document.Title == "" {
+			if _, err := fmt.Fprintln(writer, document.URL); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, err := fmt.Fprintf(writer, "%s\n  %s\n", document.Title, document.URL); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func newSearchCommand(providers *providerFlags) *cobra.Command {
@@ -186,6 +296,9 @@ func newSearchCommand(providers *providerFlags) *cobra.Command {
 
 func (flags *scrapeFlags) add(command *cobra.Command) {
 	command.Flags().StringVar(&flags.source, "source", "", "source ID")
+	command.Flags().StringVar(&flags.displayName, "display-name", "", "human-readable source name")
+	command.Flags().StringVar(&flags.description, "description", "", "short source description")
+	command.Flags().StringSliceVar(&flags.tags, "tag", nil, "repeatable source technology tag")
 	command.Flags().StringVar(&flags.version, "version", "", "documentation version metadata")
 	command.Flags().StringSliceVar(&flags.linkSelectors, "link-selector", nil, "repeatable CSS selector for crawl links")
 	command.Flags().StringVar(&flags.contentSelector, "content-selector", "", "CSS selector for page content")
@@ -211,7 +324,7 @@ func (flags scrapeFlags) validate() error {
 }
 
 func (flags scrapeFlags) config(seed string) scrape.Config {
-	return scrape.Config{Source: corpus.SourceSpec{SourceID: flags.source, SeedURL: seed, LinkSelectors: flags.linkSelectors, ContentSelector: flags.contentSelector, Version: flags.version}, Workers: flags.workers, Throttle: flags.throttle, Timeout: flags.requestTimeout, MaxRetries: flags.retries, Backoff: flags.backoff}
+	return scrape.Config{Source: corpus.SourceSpec{SourceID: flags.source, DisplayName: flags.displayName, Description: flags.description, Tags: flags.tags, SeedURL: seed, LinkSelectors: flags.linkSelectors, ContentSelector: flags.contentSelector, Version: flags.version}, Workers: flags.workers, Throttle: flags.throttle, Timeout: flags.requestTimeout, MaxRetries: flags.retries, Backoff: flags.backoff}
 }
 
 func (flags scrapeFlags) outputPath() string {

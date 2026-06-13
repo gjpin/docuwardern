@@ -72,6 +72,11 @@ docuwarden ingest <url> --source <id>
 
 docuwarden search <query> --source <id>
   [--version <version>] [--limit 5] [--format json|text]
+
+docuwarden sources [--format json|text]
+
+docuwarden documents --source <id>
+  [--version <version>] [--format json|text]
 ```
 
 Selectors are repeatable flags only. Every selected link must remain under the normalized seed origin and path, so `https://nuxt.com/docs/4.x` accepts `/docs/4.x/getting-started/styling` but rejects `/docs/3.x` and unrelated site paths.
@@ -87,6 +92,7 @@ Configuration uses flags and environment variables. Secrets are environment-only
 - Voyage document embeddings use `input_type=document`; query embeddings use `input_type=query`.
 - Build each indexing run in a new physical collection. After successful upload and validation, atomically update Qdrant aliases using its [alias API](https://api.qdrant.tech/api-reference/aliases/update-aliases).
 - Maintain a version-specific alias and a source-default alias. Searching without `--version` uses the most recently indexed successful version for that source.
+- Discover active corpora from aliases and collection metadata. `sources` reports source/version coverage, while `documents` scrolls page metadata without loading vectors.
 - Search retrieves 40 hybrid candidates by default, fuses dense and sparse rankings with Reciprocal Rank Fusion, reranks them locally, suppresses near-duplicate chunks, and returns the best five.
 - JSON output includes rank, dense score, sparse score, fusion score, reranker score, source, version, URL, title, heading path, and Markdown content. Text output produces a compact Markdown context bundle.
 

@@ -28,9 +28,59 @@ type SparseVector struct {
 type Snapshot struct {
 	Source          string
 	Version         string
+	DisplayName     string
+	Description     string
+	Tags            []string
+	SeedURL         string
+	DocumentCount   int
+	Complete        bool
+	IndexedAt       time.Time
+	EmbeddingModel  string
 	Points          []Point
 	AllowIncomplete bool
 	Retention       int
+}
+
+type Catalog struct {
+	SchemaVersion int             `json:"schema_version"`
+	Sources       []CatalogSource `json:"sources"`
+}
+
+type CatalogSource struct {
+	Source         string           `json:"source"`
+	DisplayName    string           `json:"display_name,omitempty"`
+	Description    string           `json:"description,omitempty"`
+	Tags           []string         `json:"tags,omitempty"`
+	DefaultVersion string           `json:"default_version,omitempty"`
+	Versions       []CatalogVersion `json:"versions"`
+}
+
+type CatalogVersion struct {
+	Version        string `json:"version,omitempty"`
+	SeedURL        string `json:"seed_url,omitempty"`
+	DocumentCount  int    `json:"document_count"`
+	ChunkCount     int    `json:"chunk_count"`
+	IndexedAt      string `json:"indexed_at,omitempty"`
+	Complete       bool   `json:"complete"`
+	EmbeddingModel string `json:"embedding_model,omitempty"`
+}
+
+type DocumentCatalog struct {
+	SchemaVersion int               `json:"schema_version"`
+	Source        string            `json:"source"`
+	Version       string            `json:"version,omitempty"`
+	Documents     []CatalogDocument `json:"documents"`
+}
+
+type CatalogDocument struct {
+	URL       string `json:"url"`
+	Title     string `json:"title,omitempty"`
+	CrawledAt string `json:"crawled_at,omitempty"`
+}
+
+type CatalogStore interface {
+	ListSources(ctx context.Context) (Catalog, error)
+	ListDocuments(ctx context.Context, source, version string) (DocumentCatalog, error)
 }
 
 type Candidate struct {
