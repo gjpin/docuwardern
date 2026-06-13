@@ -103,7 +103,7 @@ It does not contact embedding, reranking, or Qdrant services.
 | `--tag <tag>` | empty | no | Repeatable technology tag exposed by `sources`. |
 | `--version <version>` | empty | no | Version metadata, for example `4.x`. It does not modify the seed URL. |
 | `--content-selector <css>` | none | yes | CSS selector identifying the documentation content. The first match is converted to Markdown. |
-| `--link-selector <css>` | none | no | Repeatable CSS selector identifying links to crawl. Matches from all occurrences are combined. Without this flag only the seed page is scraped. |
+| `--link-selector <css>` | none | no | Repeatable CSS selector identifying links or a container whose descendant links should be crawled. Matches from all occurrences are combined. Without this flag only the seed page is scraped. |
 | `--output <dir>` | `artifacts/<source>/<version>` | no | Artifact directory. An empty version uses `artifacts/<source>/unversioned`. Existing `documents/` content is replaced. |
 | `--workers <count>` | `4` | no | Maximum concurrent crawl workers. Must be positive. |
 | `--throttle <duration>` | `100ms` | no | Minimum delay between requests to the same host. Use `0` to disable throttling. |

@@ -57,6 +57,7 @@ func (s Scope) Contains(u *url.URL) bool {
 }
 
 func canonicalize(u *url.URL) {
+	hadTrailingSlash := strings.HasSuffix(u.EscapedPath(), "/")
 	u.Fragment = ""
 	u.Scheme = strings.ToLower(u.Scheme)
 	u.Host = strings.ToLower(u.Host)
@@ -65,6 +66,9 @@ func canonicalize(u *url.URL) {
 		u.Host = host
 	}
 	u.Path = path.Clean("/" + strings.TrimPrefix(u.EscapedPath(), "/"))
+	if hadTrailingSlash && u.Path != "/" {
+		u.Path += "/"
+	}
 	if decoded, err := url.PathUnescape(u.Path); err == nil {
 		u.Path = decoded
 	}

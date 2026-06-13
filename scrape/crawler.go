@@ -281,24 +281,32 @@ func (c *crawler) fetchPage(ctx context.Context, pageURL string) pageResult {
 		return result
 	}
 	links := map[string]bool{}
+	consideredLinks := map[string]bool{}
 	for _, selector := range c.cfg.Source.LinkSelectors {
 		doc.Find(selector).Each(func(_ int, selected *goquery.Selection) {
-			href, exists := selected.Attr("href")
-			if !exists && !selected.Is("a") {
-				href, exists = selected.Find("a[href]").First().Attr("href")
+			addLink := func(href string) {
+				resolved, accepted, resolveErr := c.scope.Resolve(result.finalURL, href)
+				if resolveErr != nil || resolved == "" {
+					return
+				}
+				if consideredLinks[resolved] {
+					return
+				}
+				consideredLinks[resolved] = true
+				if accepted {
+					links[resolved] = true
+				} else {
+					result.skipped = append(result.skipped, corpus.PageEvent{URL: resolved, Detail: "outside seed scope"})
+				}
 			}
-			if !exists {
-				return
+			if href, exists := selected.Attr("href"); exists {
+				addLink(href)
 			}
-			resolved, accepted, resolveErr := c.scope.Resolve(result.finalURL, href)
-			if resolveErr != nil || resolved == "" {
-				return
-			}
-			if accepted {
-				links[resolved] = true
-			} else {
-				result.skipped = append(result.skipped, corpus.PageEvent{URL: resolved, Detail: "outside seed scope"})
-			}
+			selected.Find("a[href]").Each(func(_ int, link *goquery.Selection) {
+				if href, exists := link.Attr("href"); exists {
+					addLink(href)
+				}
+			})
 		})
 	}
 	for link := range links {

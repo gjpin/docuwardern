@@ -76,6 +76,59 @@ func TestNonHTMLFailsWithoutRetry(t *testing.T) {
 	}
 }
 
+func TestContainerLinkSelectorDiscoversAllDescendantAnchors(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/docs", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<nav id="copied-selector"><a href="/docs/one">One</a><section><a href="/docs/two">Two</a></section></nav><main>Home</main>`)
+	})
+	for _, page := range []string{"one", "two"} {
+		page := page
+		mux.HandleFunc("/docs/"+page, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/html")
+			fmt.Fprintf(w, `<main>%s</main>`, page)
+		})
+	}
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	artifact, err := Crawl(context.Background(), Config{Source: corpus.SourceSpec{SourceID: "docs", SeedURL: server.URL + "/docs", LinkSelectors: []string{"#copied-selector"}, ContentSelector: "main"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(artifact.Manifest.Documents) != 3 {
+		t.Fatalf("documents = %d, want 3", len(artifact.Manifest.Documents))
+	}
+}
+
+func TestTrailingSlashRedirectPreservesRelativeLinkScope(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/en/stable", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/en/stable/", http.StatusFound)
+	})
+	mux.HandleFunc("/en/stable/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<nav><a href="about/introduction.html">Introduction</a></nav><main>Home</main>`)
+	})
+	mux.HandleFunc("/en/stable/about/introduction.html", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<main>Introduction</main>`)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	artifact, err := Crawl(context.Background(), Config{Source: corpus.SourceSpec{SourceID: "docs", SeedURL: server.URL + "/en/stable", LinkSelectors: []string{"nav"}, ContentSelector: "main"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(artifact.Manifest.Documents) != 2 {
+		t.Fatalf("documents = %d, want 2; report = %+v", len(artifact.Manifest.Documents), artifact.Report)
+	}
+	if artifact.Manifest.Documents[1].URL != server.URL+"/en/stable/about/introduction.html" {
+		t.Fatalf("second document URL = %q", artifact.Manifest.Documents[1].URL)
+	}
+}
+
 func TestOutOfScopeRedirectIsSkipped(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/docs/v1", func(w http.ResponseWriter, r *http.Request) {

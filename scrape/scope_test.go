@@ -7,7 +7,7 @@ func TestScopeBoundaryAndCanonicalization(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if seed != "https://example.com/docs/4.x" {
+	if seed != "https://example.com/docs/4.x/" {
 		t.Fatalf("seed = %q", seed)
 	}
 	tests := []struct {
