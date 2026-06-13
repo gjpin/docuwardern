@@ -36,6 +36,11 @@ func TestScrapeCommandCreatesArtifact(t *testing.T) {
 	if stdout.Len() != 0 {
 		t.Fatalf("stdout contaminated: %q", stdout.String())
 	}
+	for _, expected := range []string{"crawl: starting", "crawl: fetching", "artifact: written"} {
+		if !strings.Contains(stderr.String(), expected) {
+			t.Fatalf("stderr missing %q: %s", expected, stderr.String())
+		}
+	}
 }
 
 func TestSearchRequiresSourceBeforeConnecting(t *testing.T) {

@@ -33,6 +33,7 @@ type Config struct {
 	Converter  docmarkdown.Converter
 	Now        func() time.Time
 	Sleep      func(context.Context, time.Duration) error
+	Progress   func(format string, args ...any)
 }
 
 type CrawlError struct{ Artifact corpus.Artifact }
@@ -95,42 +96,44 @@ func Crawl(ctx context.Context, cfg Config) (corpus.Artifact, error) {
 	seen := map[string]bool{seed: true}
 	documented := map[string]bool{}
 	queue := []string{seed}
+	processed := 0
+	lastProgressBucket := -1
 	for len(queue) > 0 {
 		batch := queue
 		queue = nil
-		results := c.fetchBatch(ctx, batch)
-		for _, result := range results {
+		c.fetchBatch(ctx, batch, func(result pageResult) {
 			artifact.Report.Redirected = append(artifact.Report.Redirected, result.redirects...)
 			artifact.Report.Skipped = append(artifact.Report.Skipped, result.skipped...)
 			if result.ignored {
-				continue
-			}
-			if result.err != nil {
+				// No document is produced, but the discovered page was processed.
+			} else if result.err != nil {
 				artifact.Report.Failed = append(artifact.Report.Failed, corpus.PageEvent{URL: result.requested, StatusCode: result.status, Detail: result.err.Error()})
-				continue
-			}
-			if result.missing {
+			} else if result.missing {
 				artifact.Report.SelectorMissing = append(artifact.Report.SelectorMissing, corpus.PageEvent{URL: result.finalURL, StatusCode: result.status, Detail: "content selector did not match"})
-				continue
-			}
-			if documented[result.finalURL] {
+			} else if documented[result.finalURL] {
 				artifact.Report.Skipped = append(artifact.Report.Skipped, corpus.PageEvent{URL: result.requested, Target: result.finalURL, Detail: "duplicate canonical page"})
-				continue
-			}
-			documented[result.finalURL] = true
-			crawledAt := cfg.Now().UTC()
-			id := corpus.DocumentID(cfg.Source.SourceID, cfg.Source.Version, result.finalURL)
-			doc := corpus.Document{ID: id, URL: result.finalURL, Title: result.title, Filename: "documents/" + corpus.FilenameFor(id), ContentHash: corpus.HashString(result.markdown), CrawledAt: crawledAt}
-			artifact.Manifest.Documents = append(artifact.Manifest.Documents, doc)
-			artifact.Markdown[id] = result.markdown
-			artifact.Report.Fetched = append(artifact.Report.Fetched, corpus.PageEvent{URL: result.finalURL, StatusCode: result.status})
-			for _, link := range result.links {
-				if !seen[link] {
-					seen[link] = true
-					queue = append(queue, link)
+			} else {
+				documented[result.finalURL] = true
+				crawledAt := cfg.Now().UTC()
+				id := corpus.DocumentID(cfg.Source.SourceID, cfg.Source.Version, result.finalURL)
+				doc := corpus.Document{ID: id, URL: result.finalURL, Title: result.title, Filename: "documents/" + corpus.FilenameFor(id), ContentHash: corpus.HashString(result.markdown), CrawledAt: crawledAt}
+				artifact.Manifest.Documents = append(artifact.Manifest.Documents, doc)
+				artifact.Markdown[id] = result.markdown
+				artifact.Report.Fetched = append(artifact.Report.Fetched, corpus.PageEvent{URL: result.finalURL, StatusCode: result.status})
+				for _, link := range result.links {
+					if !seen[link] {
+						seen[link] = true
+						queue = append(queue, link)
+					}
 				}
 			}
-		}
+			processed++
+			progressBucket := (processed * 100 / len(seen)) / 10 * 10
+			if cfg.Progress != nil && progressBucket >= 10 && progressBucket != lastProgressBucket {
+				cfg.Progress("crawl: fetching %d%% (%d/%d discovered pages processed)", progressBucket, processed, len(seen))
+				lastProgressBucket = progressBucket
+			}
+		})
 		sort.Strings(queue)
 		if err := ctx.Err(); err != nil {
 			artifact.Report.Failed = append(artifact.Report.Failed, corpus.PageEvent{URL: seed, Detail: err.Error()})
@@ -176,9 +179,9 @@ func defaults(cfg *Config) {
 	}
 }
 
-func (c *crawler) fetchBatch(ctx context.Context, urls []string) []pageResult {
-	results := make([]pageResult, len(urls))
+func (c *crawler) fetchBatch(ctx context.Context, urls []string, consume func(pageResult)) {
 	jobs := make(chan int)
+	results := make(chan pageResult)
 	var wg sync.WaitGroup
 	workers := min(c.cfg.Workers, len(urls))
 	for range workers {
@@ -186,16 +189,21 @@ func (c *crawler) fetchBatch(ctx context.Context, urls []string) []pageResult {
 		go func() {
 			defer wg.Done()
 			for index := range jobs {
-				results[index] = c.fetchPage(ctx, urls[index])
+				results <- c.fetchPage(ctx, urls[index])
 			}
 		}()
 	}
-	for index := range urls {
-		jobs <- index
+	go func() {
+		for index := range urls {
+			jobs <- index
+		}
+		close(jobs)
+		wg.Wait()
+		close(results)
+	}()
+	for result := range results {
+		consume(result)
 	}
-	close(jobs)
-	wg.Wait()
-	return results
 }
 
 func (c *crawler) fetchPage(ctx context.Context, pageURL string) pageResult {

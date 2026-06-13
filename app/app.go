@@ -23,6 +23,7 @@ type Service struct {
 	SparseEncoder sparse.Encoder
 	Store         vectorstore.VectorStore
 	Search        retrieval.Service
+	Progress      func(format string, args ...any)
 }
 
 type IndexOptions struct {
@@ -34,16 +35,31 @@ type IndexOptions struct {
 }
 
 func Scrape(ctx context.Context, cfg scrape.Config, output string) (corpus.Artifact, error) {
+	return scrapeArtifact(ctx, cfg, output, cfg.Progress)
+}
+
+func scrapeArtifact(ctx context.Context, cfg scrape.Config, output string, progress func(string, ...any)) (corpus.Artifact, error) {
+	if progress != nil {
+		progress("crawl: starting %s", cfg.Source.SeedURL)
+		cfg.Progress = progress
+	}
 	artifact, crawlErr := scrape.Crawl(ctx, cfg)
 	if artifact.Manifest.SchemaVersion != 0 {
+		if progress != nil {
+			progress("artifact: writing %d document(s) to %s", len(artifact.Manifest.Documents), output)
+		}
 		if err := corpus.Write(output, artifact); err != nil {
 			return artifact, errors.Join(crawlErr, err)
+		}
+		if progress != nil {
+			progress("artifact: written to %s", output)
 		}
 	}
 	return artifact, crawlErr
 }
 
 func (service Service) Index(ctx context.Context, artifactDir string, options IndexOptions) error {
+	service.progress("index: reading artifact from %s", artifactDir)
 	artifact, err := corpus.Read(artifactDir)
 	if err != nil {
 		return err
@@ -59,6 +75,7 @@ func (service Service) Index(ctx context.Context, artifactDir string, options In
 		sparseEncoder = sparse.LexicalEncoder{}
 	}
 	var points []vectorstore.Point
+	service.progress("index: chunking %d document(s)", len(artifact.Manifest.Documents))
 	for _, document := range artifact.Manifest.Documents {
 		chunks, err := chunk.Split(artifact.Markdown[document.ID], options.Chunk)
 		if err != nil {
@@ -74,9 +91,11 @@ func (service Service) Index(ctx context.Context, artifactDir string, options In
 	if len(points) == 0 {
 		return errors.New("artifact contains no indexable chunks")
 	}
+	service.progress("index: prepared %d chunk(s)", len(points))
 	dimension := 0
 	for start := 0; start < len(points); start += options.BatchSize {
 		end := min(start+options.BatchSize, len(points))
+		service.progress("index: embedding chunks %d-%d of %d", start+1, end, len(points))
 		texts := make([]string, end-start)
 		for i := start; i < end; i++ {
 			texts[i-start] = indexText(points[i])
@@ -98,7 +117,8 @@ func (service Service) Index(ctx context.Context, artifactDir string, options In
 			points[start+i].DenseVector = vector
 		}
 	}
-	return service.Store.ReplaceSnapshot(ctx, vectorstore.Snapshot{
+	service.progress("index: publishing %d chunk(s) to vector store", len(points))
+	err = service.Store.ReplaceSnapshot(ctx, vectorstore.Snapshot{
 		Source: artifact.Manifest.Source.SourceID, Version: artifact.Manifest.Source.Version,
 		DisplayName: artifact.Manifest.Source.DisplayName, Description: artifact.Manifest.Source.Description,
 		Tags: artifact.Manifest.Source.Tags, SeedURL: artifact.Manifest.Source.SeedURL,
@@ -106,6 +126,11 @@ func (service Service) Index(ctx context.Context, artifactDir string, options In
 		IndexedAt: time.Now().UTC(), EmbeddingModel: options.EmbeddingModel,
 		Points: points, AllowIncomplete: options.AllowIncomplete, Retention: options.Retention,
 	})
+	if err != nil {
+		return err
+	}
+	service.progress("index: publication complete")
+	return nil
 }
 
 func indexText(point vectorstore.Point) string {
@@ -125,17 +150,25 @@ func indexText(point vectorstore.Point) string {
 }
 
 func (service Service) Ingest(ctx context.Context, cfg scrape.Config, output string, options IndexOptions) error {
-	artifact, err := Scrape(ctx, cfg, output)
+	service.progress("ingest: crawl phase")
+	artifact, err := scrapeArtifact(ctx, cfg, output, service.Progress)
 	if err != nil && !(options.AllowIncomplete && artifact.Manifest.SchemaVersion != 0) {
 		return err
 	}
 	if indexErr := service.Index(ctx, output, options); indexErr != nil {
 		return errors.Join(err, indexErr)
 	}
+	service.progress("ingest: complete")
 	if options.AllowIncomplete {
 		return nil
 	}
 	return err
+}
+
+func (service Service) progress(format string, args ...any) {
+	if service.Progress != nil {
+		service.Progress(format, args...)
+	}
 }
 
 func pointID(source, version, url, contentHash string, index int) string {

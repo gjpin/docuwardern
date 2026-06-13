@@ -93,10 +93,9 @@ func newScrapeCommand(providers *providerFlags) *cobra.Command {
 			return err
 		}
 		output := flags.outputPath()
-		_, err := app.Scrape(command.Context(), flags.config(args[0]), output)
-		if err == nil {
-			fmt.Fprintln(command.ErrOrStderr(), "artifact:", output)
-		}
+		cfg := flags.config(args[0])
+		cfg.Progress = progressWriter(command.ErrOrStderr())
+		_, err := app.Scrape(command.Context(), cfg, output)
 		return err
 	}}
 	flags.add(command)
@@ -112,6 +111,7 @@ func newIndexCommand(providers *providerFlags) *cobra.Command {
 			return err
 		}
 		defer closeStore()
+		service.Progress = progressWriter(command.ErrOrStderr())
 		return service.Index(command.Context(), args[0], app.IndexOptions{AllowIncomplete: allowIncomplete, Retention: retention, BatchSize: batchSize, EmbeddingModel: providers.embeddingModel})
 	}}
 	command.Flags().BoolVar(&allowIncomplete, "allow-incomplete", false, "publish an incomplete crawl artifact")
@@ -133,6 +133,7 @@ func newIngestCommand(providers *providerFlags) *cobra.Command {
 			return err
 		}
 		defer closeStore()
+		service.Progress = progressWriter(command.ErrOrStderr())
 		return service.Ingest(command.Context(), flags.config(args[0]), flags.outputPath(), app.IndexOptions{AllowIncomplete: allowIncomplete, Retention: retention, BatchSize: batchSize, EmbeddingModel: providers.embeddingModel})
 	}}
 	flags.add(command)
@@ -140,6 +141,14 @@ func newIngestCommand(providers *providerFlags) *cobra.Command {
 	command.Flags().IntVar(&retention, "snapshot-retention", 2, "number of recent physical snapshots to retain")
 	command.Flags().IntVar(&batchSize, "embedding-batch-size", 64, "texts per embedding request")
 	return command
+}
+
+func progressWriter(writer io.Writer) func(string, ...any) {
+	return func(format string, args ...any) {
+		fmt.Fprintf(writer, "[%s] ", time.Now().Format("15:04:05"))
+		fmt.Fprintf(writer, format, args...)
+		fmt.Fprintln(writer)
+	}
 }
 
 func newSourcesCommand(providers *providerFlags) *cobra.Command {

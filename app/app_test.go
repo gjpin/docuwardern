@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -88,6 +89,29 @@ func TestIndexEmbedsProvenanceWithContent(t *testing.T) {
 	for _, expected := range []string{"Title: Runtime Config", "Headings: API > useRuntimeConfig", "URL: https://nuxt.com/", "Content:\nCall"} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("missing %q in %q", expected, text)
+		}
+	}
+}
+
+func TestIndexReportsProgress(t *testing.T) {
+	dir := t.TempDir()
+	id := corpus.DocumentID("docs", "v1", "https://example.com/docs")
+	body := "# Docs\n\nContent.\n"
+	artifact := corpus.Artifact{Manifest: corpus.Manifest{SchemaVersion: corpus.SchemaVersion, Source: corpus.SourceSpec{SourceID: "docs", Version: "v1"}, Complete: true, Documents: []corpus.Document{{ID: id, URL: "https://example.com/docs", Filename: "documents/" + corpus.FilenameFor(id), ContentHash: corpus.HashString(body)}}}, Markdown: map[string]string{id: body}}
+	if err := corpus.Write(dir, artifact); err != nil {
+		t.Fatal(err)
+	}
+	var messages []string
+	service := Service{Embedder: fakeEmbedder{}, Store: &fakeStore{}, Progress: func(format string, args ...any) {
+		messages = append(messages, fmt.Sprintf(format, args...))
+	}}
+	if err := service.Index(context.Background(), dir, IndexOptions{BatchSize: 1}); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(messages, "\n")
+	for _, expected := range []string{"index: reading artifact", "index: prepared 1 chunk(s)", "index: embedding chunks 1-1 of 1", "index: publication complete"} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("progress missing %q:\n%s", expected, joined)
 		}
 	}
 }

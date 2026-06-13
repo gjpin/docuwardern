@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -56,6 +57,42 @@ func TestRecursiveCrawlRetriesAndReportsPartialFailure(t *testing.T) {
 	}
 	if artifact.Markdown[artifact.Manifest.Documents[0].ID] == "" {
 		t.Fatal("missing markdown")
+	}
+}
+
+func TestCrawlReportsFetchingProgressAtTenPercentBuckets(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/docs", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<nav>`)
+		for i := 0; i < 10; i++ {
+			fmt.Fprintf(w, `<a href="/docs/%d">page</a>`, i)
+		}
+		fmt.Fprint(w, `</nav><main>Home</main>`)
+	})
+	for i := 0; i < 10; i++ {
+		path := fmt.Sprintf("/docs/%d", i)
+		mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/html")
+			fmt.Fprint(w, `<main>Page</main>`)
+		})
+	}
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	var progress []string
+	_, err := Crawl(context.Background(), Config{
+		Source:   corpus.SourceSpec{SourceID: "docs", SeedURL: server.URL + "/docs", LinkSelectors: []string{"nav a"}, ContentSelector: "main"},
+		Progress: func(format string, args ...any) { progress = append(progress, fmt.Sprintf(format, args...)) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(progress, "\n")
+	for _, expected := range []string{"fetching 10%", "fetching 50%", "fetching 100%", "11/11 discovered pages processed"} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("progress missing %q:\n%s", expected, joined)
+		}
 	}
 }
 

@@ -216,6 +216,11 @@ docuwarden ingest <url> --source <id> --content-selector <css> [flags]
 Runs `scrape` followed by `index`. The generated artifact is always retained.
 It accepts every `scrape` flag plus the following indexing flags:
 
+Workflow progress is written to stderr with timestamps. Crawl fetching is
+reported in 10% increments using the pages discovered so far, followed by
+artifact creation, chunking, embedding batches, vector store publication, and
+completion. Stdout remains available for structured command output.
+
 | Flag | Default | Description |
 | --- | --- | --- |
 | `--allow-incomplete` | false | Continue to indexing after an incomplete crawl and publish successful pages. |
