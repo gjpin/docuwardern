@@ -2,7 +2,9 @@ package scrape
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -36,7 +38,7 @@ func TestRecursiveCrawlRetriesAndReportsPartialFailure(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 	now := time.Date(2026, 6, 12, 12, 0, 0, 0, time.UTC)
-	artifact, err := Crawl(context.Background(), Config{Source: corpus.SourceSpec{SourceID: "docs", SeedURL: server.URL + "/docs/v1", LinkSelectors: []string{"nav a"}, ContentSelector: "main", Version: "v1"}, Workers: 4, MaxRetries: 2, Backoff: time.Nanosecond, Now: func() time.Time { return now }, Sleep: func(context.Context, time.Duration) error { return nil }})
+	artifact, err := Crawl(context.Background(), Config{Source: corpus.SourceSpec{SourceID: "docs", SeedURL: server.URL + "/docs/v1", ContentSelector: "main", Version: "v1"}, Workers: 4, MaxRetries: 2, Backoff: time.Nanosecond, Now: func() time.Time { return now }, Sleep: func(context.Context, time.Duration) error { return nil }})
 	if err == nil {
 		t.Fatal("expected incomplete crawl error")
 	}
@@ -82,7 +84,7 @@ func TestCrawlReportsFetchingProgressAtTenPercentBuckets(t *testing.T) {
 
 	var progress []string
 	_, err := Crawl(context.Background(), Config{
-		Source:   corpus.SourceSpec{SourceID: "docs", SeedURL: server.URL + "/docs", LinkSelectors: []string{"nav a"}, ContentSelector: "main"},
+		Source:   corpus.SourceSpec{SourceID: "docs", SeedURL: server.URL + "/docs", ContentSelector: "main"},
 		Progress: func(format string, args ...any) { progress = append(progress, fmt.Sprintf(format, args...)) },
 	})
 	if err != nil {
@@ -113,7 +115,7 @@ func TestNonHTMLFailsWithoutRetry(t *testing.T) {
 	}
 }
 
-func TestContainerLinkSelectorDiscoversAllDescendantAnchors(t *testing.T) {
+func TestCrawlDiscoversNestedAnchorsWithoutContainerConfiguration(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/docs", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
@@ -129,7 +131,7 @@ func TestContainerLinkSelectorDiscoversAllDescendantAnchors(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	artifact, err := Crawl(context.Background(), Config{Source: corpus.SourceSpec{SourceID: "docs", SeedURL: server.URL + "/docs", LinkSelectors: []string{"#copied-selector"}, ContentSelector: "main"}})
+	artifact, err := Crawl(context.Background(), Config{Source: corpus.SourceSpec{SourceID: "docs", SeedURL: server.URL + "/docs", ContentSelector: "main"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +156,7 @@ func TestTrailingSlashRedirectPreservesRelativeLinkScope(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	artifact, err := Crawl(context.Background(), Config{Source: corpus.SourceSpec{SourceID: "docs", SeedURL: server.URL + "/en/stable", LinkSelectors: []string{"nav"}, ContentSelector: "main"}})
+	artifact, err := Crawl(context.Background(), Config{Source: corpus.SourceSpec{SourceID: "docs", SeedURL: server.URL + "/en/stable", ContentSelector: "main"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +183,7 @@ func TestOutOfScopeRedirectIsSkipped(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	artifact, err := Crawl(context.Background(), Config{Source: corpus.SourceSpec{SourceID: "docs", SeedURL: server.URL + "/docs/v1", LinkSelectors: []string{"nav a"}, ContentSelector: "main"}})
+	artifact, err := Crawl(context.Background(), Config{Source: corpus.SourceSpec{SourceID: "docs", SeedURL: server.URL + "/docs/v1", ContentSelector: "main"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,4 +196,100 @@ func TestOutOfScopeRedirectIsSkipped(t *testing.T) {
 	if artifact.Report.Skipped[0].Target != server.URL+"/docs/v2/moved" {
 		t.Fatalf("skip = %+v", artifact.Report.Skipped[0])
 	}
+}
+
+func TestCrawlDeduplicatesFragmentsRedirectsAndCycles(t *testing.T) {
+	var rootCalls, pageCalls, redirectCalls, targetCalls atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/docs", func(w http.ResponseWriter, _ *http.Request) {
+		rootCalls.Add(1)
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<main>root</main><a href="/docs/page#one">page</a><a href="/docs/page#two">duplicate</a>`)
+	})
+	mux.HandleFunc("/docs/page", func(w http.ResponseWriter, _ *http.Request) {
+		pageCalls.Add(1)
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<main>page</main><a href="/docs">cycle</a><a href="/docs/redirect">redirect</a>`)
+	})
+	mux.HandleFunc("/docs/redirect", func(w http.ResponseWriter, r *http.Request) {
+		redirectCalls.Add(1)
+		http.Redirect(w, r, "/docs/target", http.StatusFound)
+	})
+	mux.HandleFunc("/docs/target", func(w http.ResponseWriter, _ *http.Request) {
+		targetCalls.Add(1)
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<main>target</main><a href="/docs/target#self">self</a>`)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	artifact, err := Crawl(context.Background(), Config{Source: corpus.SourceSpec{SourceID: "docs", SeedURL: server.URL + "/docs", ContentSelector: "main"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(artifact.Manifest.Documents) != 3 {
+		t.Fatalf("documents=%d report=%+v", len(artifact.Manifest.Documents), artifact.Report)
+	}
+	if rootCalls.Load() != 1 || pageCalls.Load() != 1 || redirectCalls.Load() != 1 || targetCalls.Load() != 1 {
+		t.Fatalf("calls root=%d page=%d redirect=%d target=%d", rootCalls.Load(), pageCalls.Load(), redirectCalls.Load(), targetCalls.Load())
+	}
+}
+
+func TestCrawlExpandsLinksFromMissingAndConversionFailingPages(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/docs", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<main>root</main><a href="/docs/missing">missing</a><a href="/docs/conversion">conversion</a>`)
+	})
+	mux.HandleFunc("/docs/missing", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<section>no selected content</section><a href="/docs/from-missing">child</a>`)
+	})
+	mux.HandleFunc("/docs/conversion", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<main>conversion fails</main><a href="/docs/from-conversion">child</a>`)
+	})
+	for _, path := range []string{"/docs/from-missing", "/docs/from-conversion"} {
+		mux.HandleFunc(path, func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/html")
+			fmt.Fprint(w, `<main>discovered child</main>`)
+		})
+	}
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	artifact, err := Crawl(context.Background(), Config{
+		Source:    corpus.SourceSpec{SourceID: "docs", SeedURL: server.URL + "/docs", ContentSelector: "main"},
+		Converter: failingConverter{pageURL: server.URL + "/docs/conversion"},
+	})
+	if err == nil {
+		t.Fatal("expected incomplete crawl")
+	}
+	if len(artifact.Manifest.Documents) != 3 || len(artifact.Report.SelectorMissing) != 1 || len(artifact.Report.Failed) != 1 {
+		t.Fatalf("documents=%d report=%+v", len(artifact.Manifest.Documents), artifact.Report)
+	}
+	for _, pageURL := range []string{server.URL + "/docs/from-missing", server.URL + "/docs/from-conversion"} {
+		if !hasDocumentURL(artifact, pageURL) {
+			t.Fatalf("discovered page %q was not documented", pageURL)
+		}
+	}
+}
+
+type failingConverter struct{ pageURL string }
+
+func (converter failingConverter) Convert(_ context.Context, pageURL string, input io.Reader) (string, error) {
+	if pageURL == converter.pageURL {
+		return "", errors.New("conversion failed")
+	}
+	body, err := io.ReadAll(input)
+	return string(body), err
+}
+
+func hasDocumentURL(artifact corpus.Artifact, pageURL string) bool {
+	for _, document := range artifact.Manifest.Documents {
+		if document.URL == pageURL {
+			return true
+		}
+	}
+	return false
 }

@@ -20,7 +20,7 @@ import (
 func TestScrapeCommandCreatesArtifact(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
-		fmt.Fprint(w, `<title>Docs</title><main><h1>Hello</h1><a href="next">next</a></main>`)
+		fmt.Fprint(w, `<title>Docs</title><main><h1>Hello</h1></main>`)
 	}))
 	defer server.Close()
 	dir := filepath.Join(t.TempDir(), "artifact")
@@ -45,7 +45,7 @@ func TestScrapeCommandCreatesArtifact(t *testing.T) {
 	}
 }
 
-func TestRetryCommandUsesRepeatedSelectorsAndOverrides(t *testing.T) {
+func TestRetryCommandUsesRepeatedContentSelectorsAndOverrides(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		fmt.Fprint(w, `<article>repaired</article>`)
@@ -57,7 +57,7 @@ func TestRetryCommandUsesRepeatedSelectorsAndOverrides(t *testing.T) {
 		t.Fatal(err)
 	}
 	command := newRoot(&bytes.Buffer{}, &bytes.Buffer{})
-	command.SetArgs([]string{"retry", dir, "--content-selector", "article", "--content-selector", "article", "--link-selector", ".links", "--link-selector", ".links", "--workers", "2", "--retries", "0", "--throttle", "0"})
+	command.SetArgs([]string{"retry", dir, "--content-selector", "article", "--content-selector", "article", "--workers", "2", "--retries", "0", "--throttle", "0"})
 	if err := command.Execute(); err != nil {
 		t.Fatal(err)
 	}
@@ -68,8 +68,24 @@ func TestRetryCommandUsesRepeatedSelectorsAndOverrides(t *testing.T) {
 	if !result.Manifest.Complete || result.Manifest.Crawl.Workers != 2 || result.Manifest.Crawl.MaxRetries != 0 || result.Manifest.Crawl.Throttle != 0 {
 		t.Fatalf("manifest = %+v", result.Manifest)
 	}
-	if len(result.Manifest.Source.ContentSelectors) != 1 || len(result.Manifest.Source.LinkSelectors) != 1 {
+	if len(result.Manifest.Source.ContentSelectors) != 1 {
 		t.Fatalf("source = %+v", result.Manifest.Source)
+	}
+}
+
+func TestCommandsRejectRemovedLinkSelectorFlag(t *testing.T) {
+	tests := [][]string{
+		{"scrape", "https://example.com/docs", "--link-selector", "a"},
+		{"ingest", "https://example.com/docs", "--link-selector", "a"},
+		{"retry", t.TempDir(), "--link-selector", "a"},
+	}
+	for _, args := range tests {
+		command := newRoot(&bytes.Buffer{}, &bytes.Buffer{})
+		command.SetArgs(args)
+		err := command.Execute()
+		if err == nil || !strings.Contains(err.Error(), "unknown flag: --link-selector") {
+			t.Errorf("%v error = %v", args, err)
+		}
 	}
 }
 

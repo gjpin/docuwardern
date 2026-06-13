@@ -10,7 +10,7 @@ Data flow:
 
 ## Key Modules
 
-- `scrape`: Concurrent static HTML crawler. Enforces same-origin and seed-path scope, evaluates repeatable link selectors on every page, deduplicates canonical URLs, throttles requests, retries transient failures, and extracts the configured content selector.
+- `scrape`: Concurrent static HTML crawler. Enforces same-origin and seed-path scope, discovers every HTML `a[href]`, deduplicates canonical URLs, throttles requests, retries transient failures, and extracts the configured content selector.
 - `markdown`: Converts extracted UTF-8 HTML using [`html-to-markdown/v2`](https://pkg.go.dev/github.com/JohannesKaufmann/html-to-markdown/v2), resolving relative links against each page URL.
 - `corpus`: Defines documents, manifests, crawl reports, and filesystem artifact serialization.
 - `chunk`: Heading-aware Markdown splitting. Preserve heading hierarchy and fenced code blocks, with configurable approximate token limit and overlap.
@@ -47,11 +47,11 @@ type VectorStore interface {
 }
 ```
 
-`SourceSpec` contains explicit source ID, seed URL, repeatable link selectors, one content selector, and optional version.
+`SourceSpec` contains explicit source ID, seed URL, one content selector with optional retry fallbacks, and optional version.
 
 Each artifact contains:
 
-- `manifest.json`: schema version, source ID, version, seed URL, selectors, timestamps, content hashes, document metadata, and completion status.
+- `manifest.json`: schema version, source ID, version, seed URL, content selectors, timestamps, content hashes, document metadata, and completion status.
 - `documents/*.md`: cleaned Markdown with collision-safe deterministic filenames.
 - `report.json`: fetched, skipped, failed, redirected, and selector-missing pages.
 
@@ -61,13 +61,13 @@ Qdrant points use named `dense` and `sparse` vectors. Dense embedding input incl
 
 ```text
 docuwarden scrape <url> --source <id>
-  --link-selector <css>... --content-selector <css>
+  --content-selector <css>
   [--version <version>] [--output <dir>]
 
 docuwarden index <artifact-dir> [--allow-incomplete]
 
 docuwarden ingest <url> --source <id>
-  --link-selector <css>... --content-selector <css>
+  --content-selector <css>
   [--version <version>] [--output <dir>]
 
 docuwarden search <query> --source <id>
@@ -79,7 +79,7 @@ docuwarden documents --source <id>
   [--version <version>] [--format json|text]
 ```
 
-Selectors are repeatable flags only. Every selected link must remain under the normalized seed origin and path, so `https://nuxt.com/docs/4.x` accepts `/docs/4.x/getting-started/styling` but rejects `/docs/3.x` and unrelated site paths.
+Every anchor is considered for discovery. Links must remain under the normalized seed origin and path, so `https://nuxt.com/docs/4.x` accepts `/docs/4.x/getting-started/styling` but rejects `/docs/3.x` and unrelated site paths. Discovery runs before content extraction so selector-missing and conversion-failing HTML pages can still expand the crawl.
 
 Configuration uses flags and environment variables. Secrets are environment-only. Provider flags select OpenAI-compatible, Cohere-compatible, or Voyage adapters; Voyage can use `VOYAGE_API_KEY` as a fallback credential.
 

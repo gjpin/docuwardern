@@ -37,7 +37,6 @@ type IndexOptions struct {
 
 type RetryOptions struct {
 	ContentSelectors []string
-	LinkSelectors    []string
 	Workers          int
 	WorkersSet       bool
 	Throttle         time.Duration
@@ -69,7 +68,6 @@ func Retry(ctx context.Context, artifactDir string, options RetryOptions) (corpu
 
 	source := artifact.Manifest.Source
 	source.ContentSelectors = appendUniqueExcluding(source.ContentSelectors, source.ContentSelector, options.ContentSelectors...)
-	source.LinkSelectors = appendUnique(source.LinkSelectors, options.LinkSelectors...)
 	settings := artifact.Manifest.Crawl
 	if settings.Workers <= 0 {
 		settings.Workers = 4

@@ -60,9 +60,9 @@ func TestCompiledCLIWorkflow(t *testing.T) {
 	source := fmt.Sprintf("e2e-%d", os.Getpid())
 	base := []string{"--embedding-endpoint", models.URL, "--embedding-model", "fake", "--reranker-endpoint", models.URL, "--reranker-model", "fake", "--qdrant-host", env("DOCUWARDEN_QDRANT_HOST", "localhost"), "--qdrant-port", env("DOCUWARDEN_QDRANT_PORT", "6334")}
 	artifact1 := filepath.Join(t.TempDir(), "v1")
-	run(t, binary, append(base, "ingest", docs.URL+"/docs/v1", "--source", source, "--version", "v1", "--link-selector", "nav a", "--content-selector", "main", "--output", artifact1, "--throttle", "0")...)
+	run(t, binary, append(base, "ingest", docs.URL+"/docs/v1", "--source", source, "--version", "v1", "--content-selector", "main", "--output", artifact1, "--throttle", "0")...)
 	artifact2 := filepath.Join(t.TempDir(), "v2")
-	run(t, binary, append(base, "ingest", docs.URL+"/docs/v2", "--source", source, "--version", "v2", "--link-selector", "nav a", "--content-selector", "main", "--output", artifact2, "--throttle", "0")...)
+	run(t, binary, append(base, "ingest", docs.URL+"/docs/v2", "--source", source, "--version", "v2", "--content-selector", "main", "--output", artifact2, "--throttle", "0")...)
 	sourcesJSON := run(t, binary, append(base, "sources", "--format", "json")...)
 	if !strings.Contains(sourcesJSON, `"source": "`+source+`"`) || !strings.Contains(sourcesJSON, `"default_version": "v2"`) || !strings.Contains(sourcesJSON, `"document_count": 3`) {
 		t.Fatalf("sources catalog:\n%s", sourcesJSON)
@@ -89,7 +89,7 @@ func TestCompiledCLIWorkflow(t *testing.T) {
 	}
 	broken.Store(true)
 	modelBroken.Store(true)
-	failed := exec.Command(binary, append(base, "ingest", docs.URL+"/docs/v2", "--source", source, "--version", "v2", "--link-selector", "nav a", "--content-selector", "main", "--output", filepath.Join(t.TempDir(), "broken"), "--throttle", "0")...)
+	failed := exec.Command(binary, append(base, "ingest", docs.URL+"/docs/v2", "--source", source, "--version", "v2", "--content-selector", "main", "--output", filepath.Join(t.TempDir(), "broken"), "--throttle", "0")...)
 	if output, err := failed.CombinedOutput(); err == nil {
 		t.Fatalf("broken replacement succeeded:\n%s", output)
 	}

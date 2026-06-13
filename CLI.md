@@ -103,7 +103,6 @@ It does not contact embedding, reranking, or Qdrant services.
 | `--tag <tag>` | empty | no | Repeatable technology tag exposed by `sources`. |
 | `--version <version>` | empty | no | Version metadata, for example `4.x`. It does not modify the seed URL. |
 | `--content-selector <css>` | none | yes | CSS selector identifying the documentation content. The first match is converted to Markdown. |
-| `--link-selector <css>` | none | no | Repeatable CSS selector identifying links or a container whose descendant links should be crawled. Matches from all occurrences are combined. Without this flag only the seed page is scraped. |
 | `--output <dir>` | `artifacts/<source>/<version>` | no | Artifact directory. An empty version uses `artifacts/<source>/unversioned`. Existing `documents/` content is replaced. |
 | `--workers <count>` | `4` | no | Maximum concurrent crawl workers. Must be positive. |
 | `--throttle <duration>` | `100ms` | no | Minimum delay between requests to the same host. Use `0` to disable throttling. |
@@ -111,7 +110,9 @@ It does not contact embedding, reranking, or Qdrant services.
 | `--retries <count>` | `3` | no | Retry count for network failures, HTTP `429`, and HTTP `5xx`. Must be non-negative. Permanent HTTP errors are not retried. |
 | `--retry-backoff <duration>` | `200ms` | no | Initial exponential retry delay. |
 
-Selected URLs must stay within the normalized seed origin and path. For a seed
+Every `a[href]` in successfully parsed HTML is discovered automatically,
+including links on pages whose content selector or Markdown conversion fails.
+Discovered URLs must stay within the normalized seed origin and path. For a seed
 of `https://nuxt.com/docs/4.x`, `/docs/4.x/api` is accepted while `/docs/5.x`,
 `/docs/4.x-old`, and other origins are skipped. Redirects outside the boundary
 are also skipped.
@@ -139,9 +140,9 @@ documents are preserved, repaired pages may discover new in-scope pages, and the
 artifact is updated atomically in place. Retry does not index or publish the
 artifact.
 
-`--content-selector` and `--link-selector` are repeatable additions to the
-selectors stored in the artifact. Content selectors are tried in stored order,
-using the first match. The crawl flags `--workers`, `--throttle`,
+`--content-selector` is a repeatable addition to the selectors stored in the
+artifact. Content selectors are tried in stored order, using the first match.
+The crawl flags `--workers`, `--throttle`,
 `--request-timeout`, `--retries`, and `--retry-backoff` override the stored
 settings only when explicitly supplied.
 
@@ -150,8 +151,7 @@ complete artifact is a successful no-op.
 
 ```sh
 docuwarden retry artifacts/nuxt/4.x \
-  --content-selector 'article.docs-content' \
-  --link-selector '.docs-navigation a'
+  --content-selector 'article.docs-content'
 ```
 
 ### Examples
@@ -165,14 +165,12 @@ Scrape one page:
   --output artifacts/example
 ```
 
-Recursively scrape Nuxt 4.x:
+Recursively scrape Nuxt 4.x by following all in-scope anchors:
 
 ```sh
 ./docuwarden scrape 'https://nuxt.com/docs/4.x' \
   --source nuxt \
   --version 4.x \
-  --link-selector 'aside a[href]' \
-  --link-selector 'header a[href]' \
   --content-selector 'main article' \
   --output artifacts/nuxt/4.x
 ```
@@ -263,8 +261,6 @@ previous active index remains unchanged.
 ./docuwarden ingest 'https://nuxt.com/docs/4.x' \
   --source nuxt \
   --version 4.x \
-  --link-selector 'aside a[href]' \
-  --link-selector 'header a[href]' \
   --content-selector 'main article' \
   --output artifacts/nuxt/4.x \
   --workers 4 \

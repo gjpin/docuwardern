@@ -44,7 +44,6 @@ type scrapeFlags struct {
 	description     string
 	tags            []string
 	version         string
-	linkSelectors   []string
 	contentSelector string
 	output          string
 	workers         int
@@ -103,13 +102,12 @@ func newScrapeCommand(providers *providerFlags) *cobra.Command {
 }
 
 func newRetryCommand() *cobra.Command {
-	var contentSelectors, linkSelectors []string
+	var contentSelectors []string
 	var workers, retries int
 	var throttle, requestTimeout, backoff time.Duration
 	command := &cobra.Command{Use: "retry <artifact-dir>", Args: cobra.ExactArgs(1), RunE: func(command *cobra.Command, args []string) error {
 		options := app.RetryOptions{
 			ContentSelectors: contentSelectors,
-			LinkSelectors:    linkSelectors,
 			Workers:          workers,
 			WorkersSet:       command.Flags().Changed("workers"),
 			Throttle:         throttle,
@@ -126,7 +124,6 @@ func newRetryCommand() *cobra.Command {
 		return err
 	}}
 	command.Flags().StringSliceVar(&contentSelectors, "content-selector", nil, "repeatable fallback CSS selector for page content")
-	command.Flags().StringSliceVar(&linkSelectors, "link-selector", nil, "repeatable CSS selector for crawl links")
 	command.Flags().IntVar(&workers, "workers", 4, "concurrent crawl workers")
 	command.Flags().DurationVar(&throttle, "throttle", 100*time.Millisecond, "minimum delay between requests to one host")
 	command.Flags().DurationVar(&requestTimeout, "request-timeout", 20*time.Second, "HTTP request timeout")
@@ -342,7 +339,6 @@ func (flags *scrapeFlags) add(command *cobra.Command) {
 	command.Flags().StringVar(&flags.description, "description", "", "short source description")
 	command.Flags().StringSliceVar(&flags.tags, "tag", nil, "repeatable source technology tag")
 	command.Flags().StringVar(&flags.version, "version", "", "documentation version metadata")
-	command.Flags().StringSliceVar(&flags.linkSelectors, "link-selector", nil, "repeatable CSS selector for crawl links")
 	command.Flags().StringVar(&flags.contentSelector, "content-selector", "", "CSS selector for page content")
 	command.Flags().StringVar(&flags.output, "output", "", "artifact output directory")
 	command.Flags().IntVar(&flags.workers, "workers", 4, "concurrent crawl workers")
@@ -366,7 +362,7 @@ func (flags scrapeFlags) validate() error {
 }
 
 func (flags scrapeFlags) config(seed string) scrape.Config {
-	return scrape.Config{Source: corpus.SourceSpec{SourceID: flags.source, DisplayName: flags.displayName, Description: flags.description, Tags: flags.tags, SeedURL: seed, LinkSelectors: flags.linkSelectors, ContentSelector: flags.contentSelector, Version: flags.version}, Workers: flags.workers, Throttle: flags.throttle, Timeout: flags.requestTimeout, MaxRetries: flags.retries, Backoff: flags.backoff}
+	return scrape.Config{Source: corpus.SourceSpec{SourceID: flags.source, DisplayName: flags.displayName, Description: flags.description, Tags: flags.tags, SeedURL: seed, ContentSelector: flags.contentSelector, Version: flags.version}, Workers: flags.workers, Throttle: flags.throttle, Timeout: flags.requestTimeout, MaxRetries: flags.retries, Backoff: flags.backoff}
 }
 
 func (flags scrapeFlags) outputPath() string {

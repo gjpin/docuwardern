@@ -87,11 +87,6 @@ func CrawlTargets(ctx context.Context, cfg Config, initialURLs, knownSuccessfulU
 			return corpus.Artifact{}, fmt.Errorf("invalid content selector %q: %w", selector, err)
 		}
 	}
-	for _, selector := range cfg.Source.LinkSelectors {
-		if _, err := cascadia.Parse(selector); err != nil {
-			return corpus.Artifact{}, fmt.Errorf("invalid link selector %q: %w", selector, err)
-		}
-	}
 	scope, seed, err := NewScope(cfg.Source.SeedURL)
 	if err != nil {
 		return corpus.Artifact{}, err
@@ -136,6 +131,7 @@ func CrawlTargets(ctx context.Context, cfg Config, initialURLs, knownSuccessfulU
 		batch := queue
 		queue = nil
 		c.fetchBatch(ctx, batch, func(result pageResult) {
+			seen[result.finalURL] = true
 			artifact.Report.Redirected = append(artifact.Report.Redirected, result.redirects...)
 			artifact.Report.Skipped = append(artifact.Report.Skipped, result.skipped...)
 			if result.ignored {
@@ -154,11 +150,11 @@ func CrawlTargets(ctx context.Context, cfg Config, initialURLs, knownSuccessfulU
 				artifact.Manifest.Documents = append(artifact.Manifest.Documents, doc)
 				artifact.Markdown[id] = result.markdown
 				artifact.Report.Fetched = append(artifact.Report.Fetched, corpus.PageEvent{URL: result.finalURL, StatusCode: result.status})
-				for _, link := range result.links {
-					if !seen[link] {
-						seen[link] = true
-						queue = append(queue, link)
-					}
+			}
+			for _, link := range result.links {
+				if !seen[link] {
+					seen[link] = true
+					queue = append(queue, link)
 				}
 			}
 			processed++
@@ -317,6 +313,24 @@ func (c *crawler) fetchPage(ctx context.Context, pageURL string) pageResult {
 		return result
 	}
 	result.title = strings.TrimSpace(doc.Find("title").First().Text())
+	links := map[string]bool{}
+	doc.Find("a[href]").Each(func(_ int, link *goquery.Selection) {
+		href, _ := link.Attr("href")
+		resolved, accepted, resolveErr := c.scope.Resolve(result.finalURL, href)
+		if resolveErr != nil || resolved == "" || links[resolved] {
+			return
+		}
+		links[resolved] = accepted
+		if !accepted {
+			result.skipped = append(result.skipped, corpus.PageEvent{URL: resolved, Detail: "outside seed scope"})
+		}
+	})
+	for link, accepted := range links {
+		if accepted {
+			result.links = append(result.links, link)
+		}
+	}
+	sort.Strings(result.links)
 	var selection *goquery.Selection
 	for _, selector := range contentSelectors(c.cfg.Source) {
 		candidate := doc.Find(selector).First()
@@ -339,39 +353,6 @@ func (c *crawler) fetchPage(ctx context.Context, pageURL string) pageResult {
 		result.err = err
 		return result
 	}
-	links := map[string]bool{}
-	consideredLinks := map[string]bool{}
-	for _, selector := range c.cfg.Source.LinkSelectors {
-		doc.Find(selector).Each(func(_ int, selected *goquery.Selection) {
-			addLink := func(href string) {
-				resolved, accepted, resolveErr := c.scope.Resolve(result.finalURL, href)
-				if resolveErr != nil || resolved == "" {
-					return
-				}
-				if consideredLinks[resolved] {
-					return
-				}
-				consideredLinks[resolved] = true
-				if accepted {
-					links[resolved] = true
-				} else {
-					result.skipped = append(result.skipped, corpus.PageEvent{URL: resolved, Detail: "outside seed scope"})
-				}
-			}
-			if href, exists := selected.Attr("href"); exists {
-				addLink(href)
-			}
-			selected.Find("a[href]").Each(func(_ int, link *goquery.Selection) {
-				if href, exists := link.Attr("href"); exists {
-					addLink(href)
-				}
-			})
-		})
-	}
-	for link := range links {
-		result.links = append(result.links, link)
-	}
-	sort.Strings(result.links)
 	return result
 }
 

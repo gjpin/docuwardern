@@ -42,7 +42,7 @@ func TestRetryRepairsAndExtendsIncompleteArtifact(t *testing.T) {
 	defer server.Close()
 
 	dir := filepath.Join(t.TempDir(), "artifact")
-	cfg := scrape.Config{Source: corpus.SourceSpec{SourceID: "docs", SeedURL: server.URL + "/docs", LinkSelectors: []string{"nav a"}, ContentSelector: "main"}, Workers: 2, MaxRetries: 0, Backoff: time.Nanosecond}
+	cfg := scrape.Config{Source: corpus.SourceSpec{SourceID: "docs", SeedURL: server.URL + "/docs", ContentSelector: "main"}, Workers: 2, MaxRetries: 0, Backoff: time.Nanosecond}
 	initial, err := scrape.Crawl(context.Background(), cfg)
 	if err == nil {
 		t.Fatal("expected incomplete initial crawl")
@@ -54,7 +54,7 @@ func TestRetryRepairsAndExtendsIncompleteArtifact(t *testing.T) {
 	goodCrawledAt := documentByID(t, initial, goodID).CrawledAt
 
 	repaired.Store(true)
-	result, err := Retry(context.Background(), dir, RetryOptions{ContentSelectors: []string{"main", "article", "article"}, LinkSelectors: []string{".extra a", ".extra a"}})
+	result, err := Retry(context.Background(), dir, RetryOptions{ContentSelectors: []string{"main", "article", "article"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,9 +69,6 @@ func TestRetryRepairsAndExtendsIncompleteArtifact(t *testing.T) {
 	}
 	if got := result.Manifest.Source.ContentSelectors; len(got) != 1 || got[0] != "article" {
 		t.Fatalf("content selectors = %#v", got)
-	}
-	if got := result.Manifest.Source.LinkSelectors; len(got) != 2 || got[0] != "nav a" || got[1] != ".extra a" {
-		t.Fatalf("link selectors = %#v", got)
 	}
 	brokenID := corpus.DocumentID("docs", "", server.URL+"/docs/broken")
 	if body := result.Markdown[brokenID]; body == "" || contains(body, "fallback") || !contains(body, "original wins") {

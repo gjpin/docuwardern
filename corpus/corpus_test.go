@@ -1,7 +1,9 @@
 package corpus
 
 import (
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -49,5 +51,38 @@ func TestDocumentIDIncludesVersionAndURL(t *testing.T) {
 	a := DocumentID("s", "v1", "https://x/a")
 	if a == DocumentID("s", "v2", "https://x/a") || a == DocumentID("s", "v1", "https://x/b") {
 		t.Fatal("document ID collision")
+	}
+}
+
+func TestLegacyLinkSelectorsAreIgnoredAndRemovedOnRewrite(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "legacy")
+	artifact := Artifact{Manifest: Manifest{SchemaVersion: SchemaVersion, Source: SourceSpec{SourceID: "source", SeedURL: "https://example.com/docs", ContentSelector: "main"}, Complete: true}, Markdown: map[string]string{}}
+	if err := Write(dir, artifact); err != nil {
+		t.Fatal(err)
+	}
+	manifestPath := filepath.Join(dir, "manifest.json")
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := strings.Replace(string(data), `"seed_url": "https://example.com/docs",`, "\"seed_url\": \"https://example.com/docs\",\n    \"link_selectors\": [\"nav a\"],", 1)
+	if err := os.WriteFile(manifestPath, []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	read, err := Read(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rewritten := filepath.Join(t.TempDir(), "rewritten")
+	if err := Write(rewritten, read); err != nil {
+		t.Fatal(err)
+	}
+	data, err = os.ReadFile(filepath.Join(rewritten, "manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "link_selectors") {
+		t.Fatalf("legacy field retained:\n%s", data)
 	}
 }

@@ -21,7 +21,6 @@ type SourceSpec struct {
 	Description      string   `json:"description,omitempty"`
 	Tags             []string `json:"tags,omitempty"`
 	SeedURL          string   `json:"seed_url"`
-	LinkSelectors    []string `json:"link_selectors,omitempty"`
 	ContentSelector  string   `json:"content_selector"`
 	ContentSelectors []string `json:"content_selectors,omitempty"`
 	Version          string   `json:"version,omitempty"`

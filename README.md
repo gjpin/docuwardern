@@ -65,8 +65,7 @@ successful pages or publishing to Qdrant:
 
 ```sh
 docuwarden retry artifacts/nuxt/4.x \
-  --content-selector 'article.docs-content' \
-  --link-selector '.docs-navigation a'
+  --content-selector 'article.docs-content'
 ```
 
 ## Nuxt Quickstart
@@ -156,15 +155,13 @@ These local servers do not require API keys.
 
 ### 4. Ingest Nuxt 4.x
 
-The supplied selectors identify navigation containers, so `a[href]` is appended
-to each link selector to select the links inside them.
+The crawler automatically follows every in-scope `a[href]` under the seed URL's
+origin and path prefix.
 
 ```sh
 ./docuwarden ingest 'https://nuxt.com/docs/4.x' \
   --source nuxt \
   --version 4.x \
-  --link-selector '#__nuxt > div.flex > div.flex-1.min-w-0 > div > main > div > div > aside > div a[href]' \
-  --link-selector '#__nuxt > div.flex > div.flex-1.min-w-0 > div > header > div.w-full.max-w-\(--ui-container\).mx-auto.px-4.sm\:px-6.lg\:px-8.hidden.lg\:flex.items-center.justify-between a[href]' \
   --content-selector '#__nuxt > div.flex > div.flex-1.min-w-0 > div > main > div > div > div > div > div.lg\:col-span-9' \
   --output artifacts/nuxt/4.x \
   --embedding-batch-size 1 \
