@@ -1,0 +1,12 @@
+services:
+  qdrant:
+    container_name: docuwarden-qdrant
+    image: qdrant/qdrant:v1.18.2
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    healthcheck:
+      test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/6333"]
+      interval: 1s
+      timeout: 1s
+      retries: 30

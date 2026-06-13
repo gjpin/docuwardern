@@ -1,0 +1,5 @@
+/docuwarden
+/bin/
+/artifacts/
+*.test
+*.out

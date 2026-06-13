@@ -1,0 +1,373 @@
+package scrape
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/PuerkitoBio/goquery"
+	"github.com/andybalholm/cascadia"
+	"github.com/zero/docuwarden/corpus"
+	docmarkdown "github.com/zero/docuwarden/markdown"
+	"golang.org/x/net/html"
+	"golang.org/x/net/html/charset"
+)
+
+type Config struct {
+	Source     corpus.SourceSpec
+	Workers    int
+	Throttle   time.Duration
+	Timeout    time.Duration
+	MaxRetries int
+	Backoff    time.Duration
+	UserAgent  string
+	HTTPClient *http.Client
+	Converter  docmarkdown.Converter
+	Now        func() time.Time
+	Sleep      func(context.Context, time.Duration) error
+}
+
+type CrawlError struct{ Artifact corpus.Artifact }
+
+func (e *CrawlError) Error() string {
+	return fmt.Sprintf("crawl incomplete: %d failed, %d missing content selector", len(e.Artifact.Report.Failed), len(e.Artifact.Report.SelectorMissing))
+}
+
+type crawler struct {
+	cfg       Config
+	scope     Scope
+	client    *http.Client
+	throttleM sync.Mutex
+	lastFetch map[string]time.Time
+}
+
+type pageResult struct {
+	requested string
+	finalURL  string
+	status    int
+	title     string
+	markdown  string
+	links     []string
+	redirects []corpus.PageEvent
+	skipped   []corpus.PageEvent
+	missing   bool
+	ignored   bool
+	err       error
+}
+
+type outsideScopeRedirectError struct {
+	target string
+}
+
+func (err *outsideScopeRedirectError) Error() string {
+	return "redirect outside seed scope: " + err.target
+}
+
+func Crawl(ctx context.Context, cfg Config) (corpus.Artifact, error) {
+	if cfg.Source.SourceID == "" || cfg.Source.SeedURL == "" || cfg.Source.ContentSelector == "" {
+		return corpus.Artifact{}, errors.New("source ID, seed URL, and content selector are required")
+	}
+	if _, err := cascadia.Parse(cfg.Source.ContentSelector); err != nil {
+		return corpus.Artifact{}, fmt.Errorf("invalid content selector: %w", err)
+	}
+	for _, selector := range cfg.Source.LinkSelectors {
+		if _, err := cascadia.Parse(selector); err != nil {
+			return corpus.Artifact{}, fmt.Errorf("invalid link selector %q: %w", selector, err)
+		}
+	}
+	scope, seed, err := NewScope(cfg.Source.SeedURL)
+	if err != nil {
+		return corpus.Artifact{}, err
+	}
+	cfg.Source.SeedURL = seed
+	defaults(&cfg)
+	c := &crawler{cfg: cfg, scope: scope, client: cfg.HTTPClient, lastFetch: map[string]time.Time{}}
+	started := cfg.Now().UTC()
+	artifact := corpus.Artifact{Manifest: corpus.Manifest{SchemaVersion: corpus.SchemaVersion, Source: cfg.Source, StartedAt: started}, Markdown: map[string]string{}}
+	seen := map[string]bool{seed: true}
+	documented := map[string]bool{}
+	queue := []string{seed}
+	for len(queue) > 0 {
+		batch := queue
+		queue = nil
+		results := c.fetchBatch(ctx, batch)
+		for _, result := range results {
+			artifact.Report.Redirected = append(artifact.Report.Redirected, result.redirects...)
+			artifact.Report.Skipped = append(artifact.Report.Skipped, result.skipped...)
+			if result.ignored {
+				continue
+			}
+			if result.err != nil {
+				artifact.Report.Failed = append(artifact.Report.Failed, corpus.PageEvent{URL: result.requested, StatusCode: result.status, Detail: result.err.Error()})
+				continue
+			}
+			if result.missing {
+				artifact.Report.SelectorMissing = append(artifact.Report.SelectorMissing, corpus.PageEvent{URL: result.finalURL, StatusCode: result.status, Detail: "content selector did not match"})
+				continue
+			}
+			if documented[result.finalURL] {
+				artifact.Report.Skipped = append(artifact.Report.Skipped, corpus.PageEvent{URL: result.requested, Target: result.finalURL, Detail: "duplicate canonical page"})
+				continue
+			}
+			documented[result.finalURL] = true
+			crawledAt := cfg.Now().UTC()
+			id := corpus.DocumentID(cfg.Source.SourceID, cfg.Source.Version, result.finalURL)
+			doc := corpus.Document{ID: id, URL: result.finalURL, Title: result.title, Filename: "documents/" + corpus.FilenameFor(id), ContentHash: corpus.HashString(result.markdown), CrawledAt: crawledAt}
+			artifact.Manifest.Documents = append(artifact.Manifest.Documents, doc)
+			artifact.Markdown[id] = result.markdown
+			artifact.Report.Fetched = append(artifact.Report.Fetched, corpus.PageEvent{URL: result.finalURL, StatusCode: result.status})
+			for _, link := range result.links {
+				if !seen[link] {
+					seen[link] = true
+					queue = append(queue, link)
+				}
+			}
+		}
+		sort.Strings(queue)
+		if err := ctx.Err(); err != nil {
+			artifact.Report.Failed = append(artifact.Report.Failed, corpus.PageEvent{URL: seed, Detail: err.Error()})
+			break
+		}
+	}
+	artifact.Manifest.CompletedAt = cfg.Now().UTC()
+	artifact.Manifest.Complete = len(artifact.Report.Failed) == 0 && len(artifact.Report.SelectorMissing) == 0
+	corpus.Sort(&artifact)
+	if !artifact.Manifest.Complete {
+		return artifact, &CrawlError{Artifact: artifact}
+	}
+	return artifact, nil
+}
+
+func defaults(cfg *Config) {
+	if cfg.Workers <= 0 {
+		cfg.Workers = 4
+	}
+	if cfg.Timeout <= 0 {
+		cfg.Timeout = 20 * time.Second
+	}
+	if cfg.MaxRetries < 0 {
+		cfg.MaxRetries = 3
+	}
+	if cfg.Backoff <= 0 {
+		cfg.Backoff = 200 * time.Millisecond
+	}
+	if cfg.UserAgent == "" {
+		cfg.UserAgent = "docuwarden/1.0 (+https://github.com/zero/docuwarden)"
+	}
+	if cfg.Converter == nil {
+		cfg.Converter = docmarkdown.HTMLConverter{}
+	}
+	if cfg.Now == nil {
+		cfg.Now = time.Now
+	}
+	if cfg.Sleep == nil {
+		cfg.Sleep = sleepContext
+	}
+	if cfg.HTTPClient == nil {
+		cfg.HTTPClient = &http.Client{Timeout: cfg.Timeout}
+	}
+}
+
+func (c *crawler) fetchBatch(ctx context.Context, urls []string) []pageResult {
+	results := make([]pageResult, len(urls))
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	workers := min(c.cfg.Workers, len(urls))
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for index := range jobs {
+				results[index] = c.fetchPage(ctx, urls[index])
+			}
+		}()
+	}
+	for index := range urls {
+		jobs <- index
+	}
+	close(jobs)
+	wg.Wait()
+	return results
+}
+
+func (c *crawler) fetchPage(ctx context.Context, pageURL string) pageResult {
+	result := pageResult{requested: pageURL, finalURL: pageURL}
+	var response *http.Response
+	var err error
+	for attempt := 0; attempt <= c.cfg.MaxRetries; attempt++ {
+		if attempt > 0 {
+			if err := c.cfg.Sleep(ctx, c.cfg.Backoff*time.Duration(1<<(attempt-1))); err != nil {
+				result.err = err
+				return result
+			}
+		}
+		if err := c.waitForHost(ctx, pageURL); err != nil {
+			result.err = err
+			return result
+		}
+		response, err = c.do(ctx, pageURL, &result)
+		var outsideScope *outsideScopeRedirectError
+		if errors.As(err, &outsideScope) {
+			break
+		}
+		if err == nil && response.StatusCode != http.StatusTooManyRequests && response.StatusCode < 500 {
+			break
+		}
+		if response != nil {
+			response.Body.Close()
+		}
+		if attempt == c.cfg.MaxRetries {
+			break
+		}
+	}
+	if err != nil {
+		var outsideScope *outsideScopeRedirectError
+		if errors.As(err, &outsideScope) {
+			result.skipped = append(result.skipped, corpus.PageEvent{URL: pageURL, Target: outsideScope.target, Detail: "redirect outside seed scope"})
+			result.ignored = true
+			return result
+		}
+		result.err = fmt.Errorf("fetch: %w", err)
+		return result
+	}
+	result.status = response.StatusCode
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		result.err = fmt.Errorf("HTTP status %s", response.Status)
+		return result
+	}
+	contentType := response.Header.Get("Content-Type")
+	if !strings.HasPrefix(strings.ToLower(contentType), "text/html") && !strings.HasPrefix(strings.ToLower(contentType), "application/xhtml+xml") {
+		result.err = fmt.Errorf("expected HTML response, got %q", contentType)
+		return result
+	}
+	utf8Reader, err := charset.NewReader(response.Body, contentType)
+	if err != nil {
+		result.err = fmt.Errorf("decode response charset: %w", err)
+		return result
+	}
+	body, err := io.ReadAll(utf8Reader)
+	if err != nil {
+		result.err = fmt.Errorf("read response: %w", err)
+		return result
+	}
+	doc, err := goquery.NewDocumentFromReader(bytes.NewReader(body))
+	if err != nil {
+		result.err = fmt.Errorf("parse HTML: %w", err)
+		return result
+	}
+	result.title = strings.TrimSpace(doc.Find("title").First().Text())
+	selection := doc.Find(c.cfg.Source.ContentSelector).First()
+	if selection.Length() == 0 {
+		result.missing = true
+		return result
+	}
+	fragment, err := selectionHTML(selection)
+	if err != nil {
+		result.err = err
+		return result
+	}
+	result.markdown, err = c.cfg.Converter.Convert(ctx, result.finalURL, strings.NewReader(fragment))
+	if err != nil {
+		result.err = err
+		return result
+	}
+	links := map[string]bool{}
+	for _, selector := range c.cfg.Source.LinkSelectors {
+		doc.Find(selector).Each(func(_ int, selected *goquery.Selection) {
+			href, exists := selected.Attr("href")
+			if !exists && !selected.Is("a") {
+				href, exists = selected.Find("a[href]").First().Attr("href")
+			}
+			if !exists {
+				return
+			}
+			resolved, accepted, resolveErr := c.scope.Resolve(result.finalURL, href)
+			if resolveErr != nil || resolved == "" {
+				return
+			}
+			if accepted {
+				links[resolved] = true
+			} else {
+				result.skipped = append(result.skipped, corpus.PageEvent{URL: resolved, Detail: "outside seed scope"})
+			}
+		})
+	}
+	for link := range links {
+		result.links = append(result.links, link)
+	}
+	sort.Strings(result.links)
+	return result
+}
+
+func (c *crawler) do(ctx context.Context, pageURL string, result *pageResult) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pageURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", c.cfg.UserAgent)
+	client := *c.client
+	baseCheck := client.CheckRedirect
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if baseCheck != nil {
+			if err := baseCheck(req, via); err != nil {
+				return err
+			}
+		}
+		canonical, accepted, err := c.scope.Resolve(via[len(via)-1].URL.String(), req.URL.String())
+		if err != nil || !accepted {
+			return &outsideScopeRedirectError{target: req.URL.String()}
+		}
+		result.redirects = append(result.redirects, corpus.PageEvent{URL: via[len(via)-1].URL.String(), Target: canonical, StatusCode: req.Response.StatusCode})
+		result.finalURL = canonical
+		return nil
+	}
+	return client.Do(req)
+}
+
+func (c *crawler) waitForHost(ctx context.Context, rawURL string) error {
+	if c.cfg.Throttle <= 0 {
+		return nil
+	}
+	u, _ := url.Parse(rawURL)
+	c.throttleM.Lock()
+	wait := c.cfg.Throttle - c.cfg.Now().Sub(c.lastFetch[u.Host])
+	if wait < 0 {
+		wait = 0
+	}
+	c.lastFetch[u.Host] = c.cfg.Now().Add(wait)
+	c.throttleM.Unlock()
+	return c.cfg.Sleep(ctx, wait)
+}
+
+func selectionHTML(selection *goquery.Selection) (string, error) {
+	var out strings.Builder
+	for _, node := range selection.Nodes {
+		if err := html.Render(&out, node); err != nil {
+			return "", fmt.Errorf("render selected HTML: %w", err)
+		}
+	}
+	return out.String(), nil
+}
+
+func sleepContext(ctx context.Context, duration time.Duration) error {
+	if duration <= 0 {
+		return ctx.Err()
+	}
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
