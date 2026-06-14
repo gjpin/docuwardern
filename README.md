@@ -24,28 +24,50 @@ output reference.
 
 ## Major Features
 
-- Recursively crawls static documentation within a seed URL's origin and path
-  boundary, with concurrent workers, throttling, retries, and crawl reports.
-- Stores reusable Markdown artifacts so failed pages can be retried and
-  indexing can resume without repeating a successful crawl.
-- Creates heading-aware searchable chunks and stores one vectorless complete
-  Markdown record for every crawled page.
-- Combines dense semantic and sparse lexical retrieval in Qdrant, then reranks
-  and deduplicates results into prompt-ready Markdown or structured JSON.
-- Publishes versioned indexes through atomic Qdrant alias updates, reuses
-  compatible embeddings, and keeps the previous index active if publication
-  fails.
-- Supports local OpenAI- and Cohere-compatible model servers as well as Voyage
-  AI, with local or cloud-hosted Qdrant.
-- Provides source and document discovery commands plus an agent skill for
-  documentation-first technical research.
+Docuwarden turns a documentation site into a reliable, searchable reference
+for developers and coding agents:
+
+1. **Crawl the documentation you care about.** Point Docuwarden at a versioned
+   documentation path and it follows in-scope pages, extracts the useful
+   content, and converts it to clean Markdown.
+2. **Keep a reusable local copy.** The crawl is saved as Markdown plus a report,
+   so you can inspect the result, retry only failed pages, or rebuild the index
+   without downloading the entire site again.
+3. **Publish a searchable version.** Docuwarden splits pages along their heading
+   structure and indexes both focused sections and complete pages in Qdrant.
+   Updating an index does not replace the working version until the new one is
+   ready.
+4. **Find the right context for a task.** Search matches both concepts and exact
+   technical terms, reranks the candidates, removes repetitive results, and
+   returns concise Markdown or JSON that can be placed directly into a prompt.
+5. **Retrieve authoritative pages when the URL is known.** Developers and agents
+   can list available sources, discover indexed pages, or fetch a complete page
+   without relying on search snippets or a live website.
+
+The model and storage stack can run locally with OpenAI- and Cohere-compatible
+servers and Qdrant, or use Voyage AI and a hosted Qdrant instance. The bundled
+agent skill makes documentation-first research the default workflow for coding
+agents.
 
 ## Agent Skill
 
 The bundled [Docuwarden documentation search skill](skills/docuwarden-docs/SKILL.md)
-instructs coding agents to discover indexed sources, search them, and retrieve
-known complete pages with Docuwarden before falling back to the web. It does
-not allow agents to scrape, ingest, or index documentation.
+makes coding agents consult your indexed documentation before falling back to
+the web. This gives them stable, version-specific context instead of relying on
+search snippets, whatever documentation happens to be current, or pages that
+may change during a task.
+
+With the skill, an agent can:
+
+- Discover which documentation sources, versions, and pages are available.
+- Search by both concepts and exact API names.
+- Receive focused, deduplicated Markdown that is ready to use as context.
+- Retrieve a complete authoritative page when its URL is known.
+
+This reduces stale-version answers, irrelevant context, and time spent
+navigating documentation sites. The skill is intentionally read-only: it lets
+agents list, search, and retrieve documentation, but not scrape, ingest, or
+replace indexes.
 
 ## Quick Starts
 
