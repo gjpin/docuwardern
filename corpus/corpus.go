@@ -169,9 +169,37 @@ func Read(dir string) (Artifact, error) {
 
 func Sort(artifact *Artifact) {
 	sort.Slice(artifact.Manifest.Documents, func(i, j int) bool { return artifact.Manifest.Documents[i].URL < artifact.Manifest.Documents[j].URL })
-	for _, events := range [][]PageEvent{artifact.Report.Fetched, artifact.Report.Redirected, artifact.Report.Skipped, artifact.Report.Failed, artifact.Report.SelectorMissing} {
-		sort.Slice(events, func(i, j int) bool { return events[i].URL < events[j].URL })
+	artifact.Report.Fetched = sortAndDeduplicateEvents(artifact.Report.Fetched)
+	artifact.Report.Redirected = sortAndDeduplicateEvents(artifact.Report.Redirected)
+	artifact.Report.Skipped = sortAndDeduplicateEvents(artifact.Report.Skipped)
+	artifact.Report.Failed = sortAndDeduplicateEvents(artifact.Report.Failed)
+	artifact.Report.SelectorMissing = sortAndDeduplicateEvents(artifact.Report.SelectorMissing)
+}
+
+func sortAndDeduplicateEvents(events []PageEvent) []PageEvent {
+	sort.Slice(events, func(i, j int) bool {
+		if events[i].URL != events[j].URL {
+			return events[i].URL < events[j].URL
+		}
+		if events[i].StatusCode != events[j].StatusCode {
+			return events[i].StatusCode < events[j].StatusCode
+		}
+		if events[i].Detail != events[j].Detail {
+			return events[i].Detail < events[j].Detail
+		}
+		return events[i].Target < events[j].Target
+	})
+	if len(events) < 2 {
+		return events
 	}
+
+	unique := events[:1]
+	for _, event := range events[1:] {
+		if event != unique[len(unique)-1] {
+			unique = append(unique, event)
+		}
+	}
+	return unique
 }
 
 func writeJSON(path string, value any) error {

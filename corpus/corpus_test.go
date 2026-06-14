@@ -54,6 +54,21 @@ func TestDocumentIDIncludesVersionAndURL(t *testing.T) {
 	}
 }
 
+func TestSortDeduplicatesIdenticalReportEvents(t *testing.T) {
+	duplicate := PageEvent{URL: "https://cloud.example.com/", Detail: "outside seed scope"}
+	distinct := PageEvent{URL: duplicate.URL, Detail: "Markdown resource"}
+	artifact := Artifact{Report: Report{Skipped: []PageEvent{duplicate, distinct, duplicate}}}
+
+	Sort(&artifact)
+
+	if len(artifact.Report.Skipped) != 2 {
+		t.Fatalf("skipped = %+v, want two distinct events", artifact.Report.Skipped)
+	}
+	if artifact.Report.Skipped[0] != distinct || artifact.Report.Skipped[1] != duplicate {
+		t.Fatalf("skipped = %+v, want sorted distinct events", artifact.Report.Skipped)
+	}
+}
+
 func TestLegacyLinkSelectorsAreIgnoredAndRemovedOnRewrite(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "legacy")
 	artifact := Artifact{Manifest: Manifest{SchemaVersion: SchemaVersion, Source: SourceSpec{SourceID: "source", SeedURL: "https://example.com/docs", ContentSelector: "main"}, Complete: true}, Markdown: map[string]string{}}
