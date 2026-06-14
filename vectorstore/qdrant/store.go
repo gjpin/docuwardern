@@ -167,6 +167,15 @@ func (s *Store) ReplaceSnapshot(ctx context.Context, snapshot vectorstore.Snapsh
 	}); err != nil {
 		return fmt.Errorf("create Qdrant collection: %w", err)
 	}
+	wait := true
+	if _, err := s.client.CreateFieldIndex(ctx, &qdrant.CreateFieldIndexCollection{
+		CollectionName: physical,
+		FieldName:      "point_kind",
+		FieldType:      qdrant.FieldType_FieldTypeKeyword.Enum(),
+		Wait:           &wait,
+	}); err != nil {
+		return fmt.Errorf("create Qdrant point kind index: %w", err)
+	}
 	published := false
 	defer func() {
 		if !published {
@@ -208,12 +217,13 @@ func (s *Store) ReplaceSnapshot(ctx context.Context, snapshot vectorstore.Snapsh
 			return fmt.Errorf("encode document payload: %w", payloadErr)
 		}
 		documentPoints[i] = &qdrant.PointStruct{
-			Id:      qdrant.NewID(uuidFromHash(document.ID)),
-			Vectors: qdrant.NewVectorsMap(map[string]*qdrant.Vector{}),
+			Id: qdrant.NewID(uuidFromHash(document.ID)),
+			Vectors: qdrant.NewVectorsMap(map[string]*qdrant.Vector{
+				denseVectorName: qdrant.NewVectorDense(make([]float32, dimension)),
+			}),
 			Payload: payload,
 		}
 	}
-	wait := true
 	for start := 0; start < len(points); start += 128 {
 		end := min(start+128, len(points))
 		if _, err := s.client.Upsert(ctx, &qdrant.UpsertPoints{CollectionName: physical, Wait: &wait, Points: points[start:end]}); err != nil {
@@ -490,8 +500,8 @@ func (s *Store) Search(ctx context.Context, request vectorstore.SearchRequest) (
 	fused, err := s.client.Query(ctx, &qdrant.QueryPoints{
 		CollectionName: collection,
 		Prefetch: []*qdrant.PrefetchQuery{
-			{Query: qdrant.NewQueryDense(request.Dense), Using: qdrant.PtrOf(denseVectorName), Limit: qdrant.PtrOf(uint64(request.Limit))},
-			{Query: qdrant.NewQuerySparse(request.Sparse.Indices, request.Sparse.Values), Using: qdrant.PtrOf(sparseVectorName), Limit: qdrant.PtrOf(uint64(request.Limit))},
+			{Query: qdrant.NewQueryDense(request.Dense), Using: qdrant.PtrOf(denseVectorName), Filter: chunkFilter(), Limit: qdrant.PtrOf(uint64(request.Limit))},
+			{Query: qdrant.NewQuerySparse(request.Sparse.Indices, request.Sparse.Values), Using: qdrant.PtrOf(sparseVectorName), Filter: chunkFilter(), Limit: qdrant.PtrOf(uint64(request.Limit))},
 		},
 		Query: qdrant.NewQueryRRF(&qdrant.Rrf{}), Limit: qdrant.PtrOf(uint64(request.Limit)), WithPayload: qdrant.NewWithPayload(true),
 	})
@@ -502,11 +512,15 @@ func (s *Store) Search(ctx context.Context, request vectorstore.SearchRequest) (
 }
 
 func (s *Store) queryDense(ctx context.Context, collection string, vector []float32, limit int) ([]*qdrant.ScoredPoint, error) {
-	return s.client.Query(ctx, &qdrant.QueryPoints{CollectionName: collection, Query: qdrant.NewQueryDense(vector), Using: qdrant.PtrOf(denseVectorName), Limit: qdrant.PtrOf(uint64(limit)), WithPayload: qdrant.NewWithPayload(true)})
+	return s.client.Query(ctx, &qdrant.QueryPoints{CollectionName: collection, Query: qdrant.NewQueryDense(vector), Using: qdrant.PtrOf(denseVectorName), Filter: chunkFilter(), Limit: qdrant.PtrOf(uint64(limit)), WithPayload: qdrant.NewWithPayload(true)})
 }
 
 func (s *Store) querySparse(ctx context.Context, collection string, vector vectorstore.SparseVector, limit int) ([]*qdrant.ScoredPoint, error) {
-	return s.client.Query(ctx, &qdrant.QueryPoints{CollectionName: collection, Query: qdrant.NewQuerySparse(vector.Indices, vector.Values), Using: qdrant.PtrOf(sparseVectorName), Limit: qdrant.PtrOf(uint64(limit)), WithPayload: qdrant.NewWithPayload(true)})
+	return s.client.Query(ctx, &qdrant.QueryPoints{CollectionName: collection, Query: qdrant.NewQuerySparse(vector.Indices, vector.Values), Using: qdrant.PtrOf(sparseVectorName), Filter: chunkFilter(), Limit: qdrant.PtrOf(uint64(limit)), WithPayload: qdrant.NewWithPayload(true)})
+}
+
+func chunkFilter() *qdrant.Filter {
+	return &qdrant.Filter{Must: []*qdrant.Condition{qdrant.NewMatchKeyword("point_kind", string(vectorstore.PointKindChunk))}}
 }
 
 func candidates(primary, dense, sparsePoints []*qdrant.ScoredPoint) []vectorstore.Candidate {
