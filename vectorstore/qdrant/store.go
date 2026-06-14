@@ -84,13 +84,20 @@ func (s *Store) LoadCachedDenseVectors(ctx context.Context, source, version, emb
 			if named == nil || named.GetVectors()[denseVectorName] == nil {
 				continue
 			}
-			vector := named.GetVectors()[denseVectorName].GetData()
+			vector := denseVectorData(named.GetVectors()[denseVectorName])
 			if len(vector) > 0 {
 				result[hash] = append([]float32(nil), vector...)
 			}
 		}
 	}
 	return result, nil
+}
+
+func denseVectorData(vector *qdrant.VectorOutput) []float32 {
+	if dense := vector.GetDense(); dense != nil {
+		return dense.GetData()
+	}
+	return vector.GetData()
 }
 
 func New(cfg Config) (*Store, error) {

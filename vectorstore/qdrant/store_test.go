@@ -3,7 +3,20 @@ package qdrantstore
 import (
 	"strings"
 	"testing"
+
+	qdrant "github.com/qdrant/go-client/qdrant"
 )
+
+func TestDenseVectorDataSupportsCurrentAndLegacyResponses(t *testing.T) {
+	current := &qdrant.VectorOutput{Vector: &qdrant.VectorOutput_Dense{Dense: &qdrant.DenseVector{Data: []float32{1, 2}}}}
+	if got := denseVectorData(current); len(got) != 2 || got[0] != 1 || got[1] != 2 {
+		t.Fatalf("current dense vector = %#v", got)
+	}
+	legacy := &qdrant.VectorOutput{Data: []float32{3, 4}}
+	if got := denseVectorData(legacy); len(got) != 2 || got[0] != 3 || got[1] != 4 {
+		t.Fatalf("legacy dense vector = %#v", got)
+	}
+}
 
 func TestPhysicalCollectionNameIncludesSourceAndVersion(t *testing.T) {
 	name := physicalName("Nuxt", "4.x")
