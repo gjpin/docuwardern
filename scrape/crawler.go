@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -316,6 +317,20 @@ func (c *crawler) fetchPage(ctx context.Context, pageURL string) pageResult {
 		result.err = fmt.Errorf("parse HTML: %w", err)
 		return result
 	}
+	if target, ok := immediateMetaRefreshTarget(doc); ok {
+		resolved, accepted, resolveErr := c.scope.Resolve(result.finalURL, target)
+		if resolveErr == nil && resolved != "" {
+			if !accepted {
+				result.skipped = append(result.skipped, corpus.PageEvent{URL: result.finalURL, Target: resolved, Detail: "redirect outside seed scope"})
+				result.ignored = true
+				return result
+			}
+			result.redirects = append(result.redirects, corpus.PageEvent{URL: result.finalURL, Target: resolved, StatusCode: result.status, Detail: "HTML meta refresh"})
+			result.links = []string{resolved}
+			result.ignored = true
+			return result
+		}
+	}
 	result.title = strings.TrimSpace(doc.Find("title").First().Text())
 	links := map[string]bool{}
 	doc.Find("a[href]").Each(func(_ int, link *goquery.Selection) {
@@ -361,6 +376,41 @@ func (c *crawler) fetchPage(ctx context.Context, pageURL string) pageResult {
 		return result
 	}
 	return result
+}
+
+func immediateMetaRefreshTarget(doc *goquery.Document) (string, bool) {
+	var target string
+	doc.Find("meta[http-equiv][content]").EachWithBreak(func(_ int, meta *goquery.Selection) bool {
+		httpEquiv, _ := meta.Attr("http-equiv")
+		if !strings.EqualFold(strings.TrimSpace(httpEquiv), "refresh") {
+			return true
+		}
+		content, _ := meta.Attr("content")
+		delay, directive, found := strings.Cut(content, ";")
+		if !found {
+			return true
+		}
+		seconds, err := strconv.ParseFloat(strings.TrimSpace(delay), 64)
+		if err != nil || seconds != 0 {
+			return true
+		}
+		name, value, found := strings.Cut(directive, "=")
+		if !found || !strings.EqualFold(strings.TrimSpace(name), "url") {
+			return true
+		}
+		value = strings.TrimSpace(value)
+		if len(value) >= 2 && ((value[0] == '\'' && value[len(value)-1] == '\'') || (value[0] == '"' && value[len(value)-1] == '"')) {
+			value = strings.TrimSpace(value[1 : len(value)-1])
+		} else if strings.HasPrefix(value, "\"") || strings.HasPrefix(value, "'") {
+			return true
+		}
+		if value == "" {
+			return true
+		}
+		target = value
+		return false
+	})
+	return target, target != ""
 }
 
 func isMarkdownURL(rawURL string) bool {

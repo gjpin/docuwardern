@@ -288,6 +288,143 @@ func TestCrawlDeduplicatesFragmentsRedirectsAndCycles(t *testing.T) {
 	}
 }
 
+func TestCrawlFollowsImmediateMetaRefresh(t *testing.T) {
+	var redirectCalls, targetCalls atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/docs", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<main>root</main><a href="/docs/redirect">redirect</a><a href="/docs/target">target</a>`)
+	})
+	mux.HandleFunc("/docs/redirect", func(w http.ResponseWriter, _ *http.Request) {
+		redirectCalls.Add(1)
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<link rel="canonical" href="/docs/target"><META HTTP-EQUIV="Refresh" CONTENT="0; URL='/docs/target#section'">`)
+	})
+	mux.HandleFunc("/docs/target", func(w http.ResponseWriter, _ *http.Request) {
+		targetCalls.Add(1)
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<main>target</main>`)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	artifact, err := Crawl(context.Background(), Config{Source: corpus.SourceSpec{SourceID: "docs", SeedURL: server.URL + "/docs", ContentSelector: "main"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if redirectCalls.Load() != 1 || targetCalls.Load() != 1 || len(artifact.Manifest.Documents) != 2 {
+		t.Fatalf("redirect calls=%d target calls=%d documents=%d report=%+v", redirectCalls.Load(), targetCalls.Load(), len(artifact.Manifest.Documents), artifact.Report)
+	}
+	if len(artifact.Report.Redirected) != 1 || len(artifact.Report.SelectorMissing) != 0 {
+		t.Fatalf("report=%+v", artifact.Report)
+	}
+	event := artifact.Report.Redirected[0]
+	if event.URL != server.URL+"/docs/redirect" || event.Target != server.URL+"/docs/target" || event.StatusCode != http.StatusOK || event.Detail != "HTML meta refresh" {
+		t.Fatalf("redirect=%+v", event)
+	}
+	if hasDocumentURL(artifact, server.URL+"/docs/redirect") || !hasDocumentURL(artifact, server.URL+"/docs/target") {
+		t.Fatalf("documents=%+v", artifact.Manifest.Documents)
+	}
+}
+
+func TestCrawlDeduplicatesKnownMetaRefreshTarget(t *testing.T) {
+	var targetCalls atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/docs/redirect", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<meta http-equiv="refresh" content="0; url=/docs/target">`)
+	})
+	mux.HandleFunc("/docs/target", func(w http.ResponseWriter, _ *http.Request) {
+		targetCalls.Add(1)
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<main>target</main>`)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	artifact, err := CrawlTargets(context.Background(), Config{Source: corpus.SourceSpec{SourceID: "docs", SeedURL: server.URL + "/docs", ContentSelector: "main"}}, []string{server.URL + "/docs/redirect"}, []string{server.URL + "/docs/target"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if targetCalls.Load() != 0 || len(artifact.Manifest.Documents) != 0 || len(artifact.Report.Redirected) != 1 {
+		t.Fatalf("target calls=%d documents=%d report=%+v", targetCalls.Load(), len(artifact.Manifest.Documents), artifact.Report)
+	}
+}
+
+func TestCrawlFollowsHTTPThenMetaRefreshChain(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/docs", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/docs/redirect", http.StatusFound)
+	})
+	mux.HandleFunc("/docs/redirect", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<meta http-equiv="refresh" content="0;url=/docs/target">`)
+	})
+	mux.HandleFunc("/docs/target", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<main>target</main>`)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	artifact, err := Crawl(context.Background(), Config{Source: corpus.SourceSpec{SourceID: "docs", SeedURL: server.URL + "/docs", ContentSelector: "main"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(artifact.Report.Redirected) != 2 || len(artifact.Manifest.Documents) != 1 || artifact.Manifest.Documents[0].URL != server.URL+"/docs/target" {
+		t.Fatalf("documents=%+v report=%+v", artifact.Manifest.Documents, artifact.Report)
+	}
+}
+
+func TestCrawlSkipsOutOfScopeMetaRefresh(t *testing.T) {
+	var targetCalls atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { targetCalls.Add(1) }))
+	defer target.Close()
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprintf(w, `<meta http-equiv="refresh" content="0; url=%s/target">`, target.URL)
+	}))
+	defer source.Close()
+
+	artifact, err := Crawl(context.Background(), Config{Source: corpus.SourceSpec{SourceID: "docs", SeedURL: source.URL + "/docs", ContentSelector: "main"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if targetCalls.Load() != 0 || len(artifact.Manifest.Documents) != 0 || len(artifact.Report.Skipped) != 1 || len(artifact.Report.SelectorMissing) != 0 {
+		t.Fatalf("target calls=%d documents=%d report=%+v", targetCalls.Load(), len(artifact.Manifest.Documents), artifact.Report)
+	}
+	if artifact.Report.Skipped[0].URL != source.URL+"/docs" || artifact.Report.Skipped[0].Target != target.URL+"/target" || artifact.Report.Skipped[0].Detail != "redirect outside seed scope" {
+		t.Fatalf("skip=%+v", artifact.Report.Skipped[0])
+	}
+}
+
+func TestInvalidOrDelayedMetaRefreshUsesNormalSelectorHandling(t *testing.T) {
+	tests := []struct {
+		name string
+		meta string
+	}{
+		{name: "delayed", meta: `<meta http-equiv="refresh" content="1; url=/docs/target">`},
+		{name: "missing target", meta: `<meta http-equiv="refresh" content="0">`},
+		{name: "empty target", meta: `<meta http-equiv="refresh" content="0; url=">`},
+		{name: "malformed quote", meta: `<meta http-equiv="refresh" content="0; url='/docs/target">`},
+		{name: "canonical only", meta: `<link rel="canonical" href="/docs/target">`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/html")
+				fmt.Fprint(w, test.meta)
+			}))
+			defer server.Close()
+
+			artifact, err := Crawl(context.Background(), Config{Source: corpus.SourceSpec{SourceID: "docs", SeedURL: server.URL + "/docs", ContentSelector: "main"}})
+			if err == nil || len(artifact.Report.SelectorMissing) != 1 || len(artifact.Report.Redirected) != 0 {
+				t.Fatalf("err=%v report=%+v", err, artifact.Report)
+			}
+		})
+	}
+}
+
 func TestCrawlExpandsLinksFromMissingAndConversionFailingPages(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/docs", func(w http.ResponseWriter, _ *http.Request) {
