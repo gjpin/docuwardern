@@ -1,85 +1,85 @@
 # Docuwarden
 
-Docuwarden crawls static documentation, stores reusable Markdown artifacts, indexes heading-aware chunks in Qdrant, and retrieves reranked context for coding agents.
+Docuwarden crawls static documentation, stores reusable Markdown artifacts,
+indexes heading-aware chunks in Qdrant, and retrieves reranked context for
+coding agents.
 
 See [CLI.md](CLI.md) for the complete command, flag, environment-variable, and
 output reference.
 
-## Build And Test
+## Table Of Contents
 
-Requires Go 1.26.
+- [Quick Starts](#quick-starts)
+- [Cloud Quick Start](#cloud-quick-start)
+- [Local Quick Start](#local-quick-start)
+- [Ingest Documentation](#ingest-documentation)
+- [Recover From A Failed Ingest](#recover-from-a-failed-ingest)
+- [Search](#search)
+- [Validate The Index](#validate-the-index)
+- [Configuration](#configuration)
+- [Development](#development)
 
-```sh
-make test
-make build
-```
+## Quick Starts
 
-The complete compiled-CLI workflow uses Podman Compose, a local Qdrant container, and deterministic in-process model services:
+Choose the setup that matches where you want to run the model and vector
+services:
 
-```sh
-make e2e
-```
+- [Cloud quick start](#cloud-quick-start): Voyage AI for embeddings and
+  reranking, with Qdrant Cloud for vector storage.
+- [Local quick start](#local-quick-start): local Qwen models served by
+  `llama-server`, with Qdrant running under Podman Compose.
 
-Override the Compose command when needed, for example `make e2e COMPOSE='docker compose'`.
+Both setups use `./bin/docuwarden`. Build it first with `make build`; build and
+test details are in [Development](#development).
 
-## Configuration
+## Cloud Quick Start
 
-Secrets are environment-only:
-
-```text
-DOCUWARDEN_QDRANT_API_KEY
-DOCUWARDEN_EMBEDDING_API_KEY
-DOCUWARDEN_RERANKER_API_KEY
-VOYAGE_API_KEY
-```
-
-Non-secret settings can use flags or these environment variables:
-
-```text
-DOCUWARDEN_QDRANT_HOST          default: localhost
-DOCUWARDEN_QDRANT_PORT          default: 6334
-DOCUWARDEN_QDRANT_TLS           default: false
-DOCUWARDEN_EMBEDDING_ENDPOINT
-DOCUWARDEN_EMBEDDING_PROVIDER   default: openai
-DOCUWARDEN_EMBEDDING_MODEL
-DOCUWARDEN_RERANKER_ENDPOINT
-DOCUWARDEN_RERANKER_PROVIDER    default: cohere
-DOCUWARDEN_RERANKER_MODEL
-```
-
-Voyage AI is supported directly for both operations:
+Create an account with [Voyage AI](https://www.voyageai.com/) for an API key
+and with [Qdrant](https://qdrant.tech/) for a Qdrant Cloud cluster. Then
+configure Docuwarden with the cluster's gRPC host and API key:
 
 ```sh
-export VOYAGE_API_KEY='<your secret key>'
+export VOYAGE_API_KEY=''
 export DOCUWARDEN_EMBEDDING_PROVIDER=voyage
 export DOCUWARDEN_EMBEDDING_MODEL=voyage-4-lite
 export DOCUWARDEN_RERANKER_PROVIDER=voyage
 export DOCUWARDEN_RERANKER_MODEL=rerank-2.5-lite
+export DOCUWARDEN_QDRANT_HOST=''
+export DOCUWARDEN_QDRANT_PORT=6334
+export DOCUWARDEN_QDRANT_TLS=true
+export DOCUWARDEN_QDRANT_API_KEY=''
 ```
 
-The Voyage API endpoint defaults to `https://api.voyageai.com`. The
-operation-specific Docuwarden API key variables override `VOYAGE_API_KEY`.
+Set `DOCUWARDEN_QDRANT_HOST` to the Qdrant cluster's bare gRPC hostname, without
+an `https://` prefix. Docuwarden connects over gRPC and enables transport
+security through `DOCUWARDEN_QDRANT_TLS=true`.
 
-Incomplete crawl artifacts can be repaired in place without re-fetching
-successful pages or publishing to Qdrant:
+Voyage requests default to `https://api.voyageai.com`, so no embedding or
+reranker endpoint is required. Continue with the shared
+[ingest examples](#ingest-documentation).
+
+## Local Quick Start
+
+This setup runs Qdrant under Podman and serves local Qwen embedding and
+reranking models with `llama-server` from
+[llama.cpp](https://github.com/ggml-org/llama.cpp).
+
+### Start Qdrant
 
 ```sh
-docuwarden retry artifacts/nuxt/4.x \
-  --content-selector 'article.docs-content'
+podman compose up -d --wait qdrant
 ```
 
-## Nuxt Quickstart
+The Compose service exposes Qdrant's REST API and Web UI on port `6333` and the
+gRPC API used by Docuwarden on port `6334`.
 
-This example indexes the Nuxt 4.x documentation using Qdrant under Podman and
-local Qwen embedding and reranking models served by `llama-server`.
+### Serve The Models
 
-### 1. Start The Models
+Download the
+[Qwen3 embedding model](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B-GGUF)
+and run it in one terminal:
 
-Run each server in a separate terminal:
-
-[Qwen3-Embedding-0.6B](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B-GGUF)
 ```sh
-# Embedding server
 llama-server \
   -m ~/Downloads/Qwen3-Embedding-0.6B-Q8_0.gguf \
   --embedding \
@@ -94,9 +94,11 @@ llama-server \
   --port 8080
 ```
 
-[qwen3-reranker-0.6b](https://huggingface.co/ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF)
+Download the
+[Qwen3 reranker model](https://huggingface.co/ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF)
+and run it in a second terminal:
+
 ```sh
-# Reranker server
 llama-server \
   -m ~/Downloads/qwen3-reranker-0.6b-q8_0.gguf \
   --embedding \
@@ -113,170 +115,182 @@ llama-server \
   --port 8081
 ```
 
-`--parallel 1` prevents `llama-server` from distributing one embedding request
-across several slots. The matching `--batch-size 2048` and
-`--ubatch-size 2048` settings allow one documentation chunk to contain up to
-2,048 model tokens. Without them, llama.cpp currently reduces the physical
-batch to 512 tokens, which can terminate the server when a larger Nuxt chunk is
-embedded. Prompt caching, context checkpoints, and continuous batching are
-disabled because independent embedding requests do not benefit from them.
+`--parallel 1` keeps each request in one server slot. The larger physical
+batches allow documentation chunks and reranking inputs to exceed llama.cpp's
+smaller default batch without terminating the server.
 
-`--embedding-batch-size 1` sends one chunk per HTTP request. This is slower than
-larger request batches, but is the most conservative setting for local
-llama.cpp embedding servers and does not change embedding quality.
+### Configure Docuwarden
 
-The reranker uses the same single-slot and cache-disabled settings. Its
-physical batch is 4,096 tokens because each reranking input combines the query,
-model-specific formatting, and a retrieved documentation chunk.
-
-### 2. Build Docuwarden And Start Qdrant
+Use endpoint base URLs without a `/v1` suffix:
 
 ```sh
-make build
-podman compose up -d --wait qdrant
-```
-
-The Compose configuration pins Qdrant `v1.18.2`, the latest stable release.
-It exposes the REST API and Web UI on port `6333`, and the gRPC API used by
-Docuwarden on port `6334`.
-
-### 3. Configure Docuwarden
-
-Use endpoint base URLs without the `/v1` suffix:
-
-```sh
+export DOCUWARDEN_EMBEDDING_PROVIDER=openai
 export DOCUWARDEN_EMBEDDING_ENDPOINT=http://127.0.0.1:8080
 export DOCUWARDEN_EMBEDDING_MODEL=qwen3-embedding-0.6b
+export DOCUWARDEN_RERANKER_PROVIDER=cohere
 export DOCUWARDEN_RERANKER_ENDPOINT=http://127.0.0.1:8081
 export DOCUWARDEN_RERANKER_MODEL=qwen3-reranker-0.6b
+export DOCUWARDEN_QDRANT_HOST=localhost
+export DOCUWARDEN_QDRANT_PORT=6334
+export DOCUWARDEN_QDRANT_TLS=false
 ```
 
-These local servers do not require API keys.
+The local services do not require API keys. For conservative local embedding,
+change `--embedding-batch-size 64` in the examples below to `1` and increase
+`--provider-timeout` if necessary.
 
-### 4. Ingest Nuxt 4.x
+Continue with the shared [ingest examples](#ingest-documentation).
 
-The crawler automatically follows every in-scope `a[href]` under the seed URL's
-origin and path prefix.
+## Ingest Documentation
+
+`ingest` crawls the documentation, retains a reusable artifact, and publishes
+the resulting chunks to Qdrant. The crawler follows in-scope links under the
+seed URL's origin and path prefix.
+
+### Nuxt
 
 ```sh
-./docuwarden ingest 'https://nuxt.com/docs/4.x' \
+./bin/docuwarden ingest 'https://nuxt.com/docs/4.x' \
   --source nuxt \
+  --display-name "Nuxt" \
+  --description "Nuxt framework documentation" \
   --version 4.x \
   --content-selector '#__nuxt > div.flex > div.flex-1.min-w-0 > div > main > div > div > div > div > div.lg\:col-span-9' \
   --output artifacts/nuxt/4.x \
-  --embedding-batch-size 1 \
-  --provider-timeout 10m
+  --embedding-batch-size 64 \
+  --provider-timeout 2m
 ```
 
-The retained artifact contains `manifest.json`, `report.json`, and deterministic
-Markdown files under `artifacts/nuxt/4.x/documents/`.
-
-Indexing stores two named vectors for every chunk:
-
-- `dense`: semantic Qwen embedding of the title, heading path, URL, and content.
-- `sparse`: lexical term frequencies with Qdrant's server-side IDF modifier.
-
-### 5. Validate The Index In Qdrant
-
-Open the Qdrant Web UI after ingestion:
-
-<http://localhost:6333/dashboard>
-
-Use the UI to validate the indexed data:
-
-1. Open **Collections** and select a collection beginning with
-   `nuxt__4_x__snapshot_`.
-2. Confirm the collection status is green and the point count is greater than
-   zero. Each point represents one Markdown chunk.
-3. Open the collection's **Data** or points view and inspect several points.
-4. Confirm the collection has named `dense` and `sparse` vector definitions.
-5. Confirm point payloads contain `source: "nuxt"`, `version: "4.x"`, `url`,
-   `title`, `heading_path`, `chunk_index`, `markdown`, `content_hash`, and
-   `crawled_at`.
-6. Check that the stored Markdown and URL correspond to the Nuxt page from
-   which the chunk was produced.
-
-Docuwarden uses the source ID and version in physical collection names. For
-`--source nuxt --version 4.x`, names use the format
-`nuxt__4_x__snapshot_<timestamp>_<suffix>`. The unique suffix is required for
-atomic replacement: a new collection is fully indexed before stable aliases
-are switched to it. Search uses those aliases rather than writing directly into
-the active collection.
-
-The Web UI **Console** can also validate the service and list collections:
-
-```http
-GET /healthz
-GET /collections
-GET /aliases
-```
-
-For the official UI documentation, see
-<https://qdrant.tech/documentation/web-ui/>.
-
-### 6. Search
-
-Discover the documentation currently available to search:
+### Godot
 
 ```sh
-./docuwarden sources --format json
-./docuwarden documents --source nuxt --version 4.x --format json
+./bin/docuwarden ingest 'https://docs.godotengine.org/en/stable' \
+  --source godot \
+  --display-name "Godot" \
+  --description "Godot game engine documentation" \
+  --version 4.6 \
+  --content-selector 'body > div.wy-grid-for-nav > section > div > div > div.document > div' \
+  --output artifacts/godot/4.6 \
+  --embedding-batch-size 64 \
+  --provider-timeout 2m
 ```
 
-`sources` reads active Qdrant aliases, so its catalog stays synchronized with
-atomic index publication. New indexes include source metadata, document and
-chunk counts, crawl completeness, indexing time, and the embedding model.
+Each artifact contains:
+
+```text
+<artifact-dir>/manifest.json
+<artifact-dir>/report.json
+<artifact-dir>/documents/*.md
+```
+
+## Recover From A Failed Ingest
+
+An ingest has separate crawl and indexing phases. The artifact is retained
+when either phase fails, so recovery does not need to repeat successful work.
+
+### Retry Failed Pages, Then Index
+
+If the crawl failed for some pages or a content selector did not match, retry
+only the failed and selector-missing URLs. `retry` updates the existing
+artifact and does not publish it:
+
+```sh
+./bin/docuwarden retry artifacts/nuxt/4.x
+```
+
+You can add a fallback selector during recovery:
+
+```sh
+./bin/docuwarden retry artifacts/nuxt/4.x \
+  --content-selector 'article.docs-content'
+```
+
+After retry succeeds, index the repaired artifact without crawling again:
+
+```sh
+./bin/docuwarden index artifacts/nuxt/4.x \
+  --embedding-batch-size 64 \
+  --provider-timeout 2m
+```
+
+### Index Only After An Indexing Failure
+
+If crawling completed but embedding or Qdrant publication failed, restore the
+failed service and run only `index`:
+
+```sh
+./bin/docuwarden index artifacts/nuxt/4.x \
+  --embedding-batch-size 64 \
+  --provider-timeout 2m
+```
+
+Check `manifest.json` before indexing. Its `complete` field must be `true`
+unless you intentionally pass `--allow-incomplete`. A failed publication does
+not replace the previously active Qdrant index.
+
+## Search
+
+List the available sources and documents:
+
+```sh
+./bin/docuwarden sources --format json
+./bin/docuwarden documents --source nuxt --version 4.x --format json
+```
 
 Return a prompt-ready Markdown context bundle:
 
 ```sh
-./docuwarden search \
+./bin/docuwarden search \
   'How do I define runtime configuration in Nuxt?' \
   --source nuxt \
   --version 4.x \
   --format text \
   --limit 5 \
   --candidates 40 \
-  --provider-timeout 10m
+  --provider-timeout 2m
 ```
 
-Return machine-readable JSON:
+Use `--format json` for machine-readable results. Search defaults to hybrid
+dense and sparse retrieval followed by reranking. Omitting `--version` searches
+the most recently indexed successful version for the source.
+
+## Validate The Index
+
+For local Qdrant, open <http://localhost:6333/dashboard>. In Qdrant Cloud, open
+the cluster dashboard.
+
+Confirm that:
+
+1. A collection named like `<source>__<version>__snapshot_<timestamp>_<suffix>`
+   exists and has a green status.
+2. Its point count is greater than zero.
+3. The collection defines named `dense` and `sparse` vectors.
+4. Point payloads contain fields such as `source`, `version`, `url`, `title`,
+   `heading_path`, `chunk_index`, `markdown`, `content_hash`, and `crawled_at`.
+
+Docuwarden publishes a new physical collection before switching stable aliases,
+so a failed replacement leaves the previous index active.
+
+## Development
+
+Development requires Go 1.26.
+
+Build the CLI and run the unit tests:
 
 ```sh
-./docuwarden search \
-  'How do I create a server API route?' \
-  --source nuxt \
-  --format json \
-  --limit 5 \
-  --candidates 40 \
-  --provider-timeout 10m
+make build
+make test
 ```
 
-Search defaults to hybrid retrieval. Qdrant retrieves dense and sparse
-candidates, combines them with Reciprocal Rank Fusion, and Docuwarden reranks
-the fused top 40 with the configured reranker. Near-duplicate overlapping
-chunks from the same page are suppressed before the top results are returned.
-
-JSON results include `dense_score`, `sparse_score`, `fusion_score`, and
-`reranker_score`. The compatibility field `vector_score` contains the fusion
-score. Use `--search-mode dense` only for troubleshooting or comparison.
-
-Omitting `--version` searches the most recently indexed successful version for
-the source. Incomplete crawls remain on disk and are not published unless
-`--allow-incomplete` is explicitly supplied. Each indexing run publishes a new
-physical Qdrant collection and updates stable aliases only after validation.
-
-### Resume After An Embedding Server Failure
-
-Scraping and indexing are separate phases even when invoked through `ingest`.
-If the crawl artifact is complete but the embedding server stops, restart the
-server and index the retained artifact without crawling the site again:
+Run the complete compiled-CLI workflow with the local Qdrant Compose service
+and deterministic in-process model services:
 
 ```sh
-./docuwarden index artifacts/nuxt/4.x \
-  --embedding-batch-size 1 \
-  --provider-timeout 10m
+make e2e
 ```
 
-Check `artifacts/nuxt/4.x/manifest.json` first. Its `complete` field must be
-`true` unless incomplete indexing is intentionally enabled.
+Override the Compose command when needed, for example:
+
+```sh
+make e2e COMPOSE='docker compose'
+```
