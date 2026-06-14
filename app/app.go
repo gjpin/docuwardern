@@ -28,11 +28,13 @@ type Service struct {
 }
 
 type IndexOptions struct {
-	AllowIncomplete bool
-	BatchSize       int
-	Chunk           chunk.Config
-	Retention       int
-	EmbeddingModel  string
+	AllowIncomplete  bool
+	BatchSize        int
+	Chunk            chunk.Config
+	Retention        int
+	EmbeddingModel   string
+	EmbeddingProfile embedding.Profile
+	ForceReembed     bool
 }
 
 type RetryOptions struct {
@@ -260,7 +262,9 @@ func (service Service) Index(ctx context.Context, artifactDir string, options In
 		}
 		for _, item := range chunks {
 			point := vectorstore.Point{ID: pointID(artifact.Manifest.Source.SourceID, artifact.Manifest.Source.Version, document.URL, document.ContentHash, item.Index), Source: artifact.Manifest.Source.SourceID, Version: artifact.Manifest.Source.Version, URL: document.URL, Title: document.Title, HeadingPath: item.HeadingPath, ChunkIndex: item.Index, Markdown: item.Markdown, ContentHash: document.ContentHash, CrawledAt: document.CrawledAt}
-			encoded := sparseEncoder.Encode(indexText(point))
+			input := indexText(point)
+			point.InputHash = hashString(input)
+			encoded := sparseEncoder.Encode(input)
 			point.Sparse = vectorstore.SparseVector{Indices: encoded.Indices, Values: encoded.Values}
 			points = append(points, point)
 		}
@@ -269,14 +273,49 @@ func (service Service) Index(ctx context.Context, artifactDir string, options In
 		return errors.New("artifact contains no indexable chunks")
 	}
 	service.progress("index: prepared %d chunk(s)", len(points))
-	dimension := 0
-	for start := 0; start < len(points); start += options.BatchSize {
-		end := min(start+options.BatchSize, len(points))
-		service.progress("index: embedding chunks %d-%d of %d", start+1, end, len(points))
-		texts := make([]string, end-start)
-		for i := start; i < end; i++ {
-			texts[i-start] = indexText(points[i])
+	profile := options.EmbeddingProfile
+	if profile.Model == "" {
+		profile.Model = options.EmbeddingModel
+	}
+	if profile.InputType == "" {
+		profile.InputType = "document"
+	}
+	profileFingerprint := profile.Fingerprint()
+	cached := map[string][]float32{}
+	if !options.ForceReembed {
+		hashes := make([]string, len(points))
+		for i := range points {
+			hashes[i] = points[i].InputHash
 		}
+		cached, err = service.Store.LoadCachedDenseVectors(ctx, artifact.Manifest.Source.SourceID, artifact.Manifest.Source.Version, profileFingerprint, hashes)
+		if err != nil {
+			return fmt.Errorf("load cached embeddings: %w", err)
+		}
+		if cached == nil {
+			cached = map[string][]float32{}
+		}
+	}
+	missInputs := make([]string, 0, len(points))
+	missHashes := make([]string, 0, len(points))
+	seenMisses := map[string]bool{}
+	reused := 0
+	for i := range points {
+		if vector := cached[points[i].InputHash]; len(vector) > 0 {
+			points[i].DenseVector = vector
+			reused++
+			continue
+		}
+		if !seenMisses[points[i].InputHash] {
+			seenMisses[points[i].InputHash] = true
+			missHashes = append(missHashes, points[i].InputHash)
+			missInputs = append(missInputs, indexText(points[i]))
+		}
+	}
+	embedded := 0
+	for start := 0; start < len(missInputs); start += options.BatchSize {
+		end := min(start+options.BatchSize, len(missInputs))
+		service.progress("index: embedding inputs %d-%d of %d", start+1, end, len(missInputs))
+		texts := missInputs[start:end]
 		vectors, err := service.Embedder.Embed(ctx, texts)
 		if err != nil {
 			return fmt.Errorf("embed chunks: %w", err)
@@ -285,22 +324,31 @@ func (service Service) Index(ctx context.Context, artifactDir string, options In
 			return fmt.Errorf("embedding count mismatch: got %d, want %d", len(vectors), len(texts))
 		}
 		for i, vector := range vectors {
-			if dimension == 0 {
-				dimension = len(vector)
+			if len(vector) == 0 {
+				return fmt.Errorf("embedding is empty at input %d", start+i)
 			}
-			if dimension == 0 || len(vector) != dimension {
-				return fmt.Errorf("embedding dimension mismatch at chunk %d", start+i)
-			}
-			points[start+i].DenseVector = vector
+			cached[missHashes[start+i]] = vector
+			embedded++
 		}
 	}
+	dimension := 0
+	for i := range points {
+		points[i].DenseVector = cached[points[i].InputHash]
+		if dimension == 0 {
+			dimension = len(points[i].DenseVector)
+		}
+		if dimension == 0 || len(points[i].DenseVector) != dimension {
+			return fmt.Errorf("embedding dimension mismatch at chunk %d", i)
+		}
+	}
+	service.progress("index: embeddings: %d reused, %d embedded", reused, embedded)
 	service.progress("index: publishing %d chunk(s) to vector store", len(points))
 	err = service.Store.ReplaceSnapshot(ctx, vectorstore.Snapshot{
 		Source: artifact.Manifest.Source.SourceID, Version: artifact.Manifest.Source.Version,
 		DisplayName: artifact.Manifest.Source.DisplayName, Description: artifact.Manifest.Source.Description,
 		Tags: artifact.Manifest.Source.Tags, SeedURL: artifact.Manifest.Source.SeedURL,
 		DocumentCount: len(artifact.Manifest.Documents), Complete: artifact.Manifest.Complete,
-		IndexedAt: time.Now().UTC(), EmbeddingModel: options.EmbeddingModel,
+		IndexedAt: time.Now().UTC(), EmbeddingModel: options.EmbeddingModel, EmbeddingProfile: profileFingerprint,
 		Points: points, AllowIncomplete: options.AllowIncomplete, Retention: options.Retention,
 	})
 	if err != nil {
@@ -308,6 +356,11 @@ func (service Service) Index(ctx context.Context, artifactDir string, options In
 	}
 	service.progress("index: publication complete")
 	return nil
+}
+
+func hashString(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
 }
 
 func indexText(point vectorstore.Point) string {

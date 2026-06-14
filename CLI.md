@@ -191,11 +191,15 @@ atomically updates stable aliases.
 | --- | --- | --- |
 | `--allow-incomplete` | false | Permit publication of an artifact whose manifest has `complete: false`. The override is recorded in point payloads. |
 | `--embedding-batch-size <count>` | `64` | Number of chunk texts sent in each embedding HTTP request. Values at or below zero use `64`. Use `1` for conservative local llama.cpp operation. |
+| `--force-reembed` | false | Ignore compatible dense vectors from the active snapshot and embed all current inputs again. |
 | `--snapshot-retention <count>` | `2` | Target number of recent physical collections retained per source. Active aliased collections are never deleted. Values at or below zero use `2`. |
 
 Embedding input includes the page title, heading path, URL, and Markdown. Each
 point stores named `dense` and `sparse` vectors. Qdrant applies IDF weighting to
-the sparse vector.
+the sparse vector. Dense vectors are reused by exact embedding-input hash when
+the active snapshot has the same provider, endpoint, model, input type, and
+input-format version. Sparse vectors are recalculated on every run, and every
+successful run still publishes a complete replacement collection.
 
 Physical collections are named from the source and version:
 
@@ -249,6 +253,7 @@ completion. Stdout remains available for structured command output.
 | --- | --- | --- |
 | `--allow-incomplete` | false | Continue to indexing after an incomplete crawl and publish successful pages. |
 | `--embedding-batch-size <count>` | `64` | Number of texts per embedding request. Values at or below zero use `64`. |
+| `--force-reembed` | false | Ignore compatible dense vectors from the active snapshot. |
 | `--snapshot-retention <count>` | `2` | Target physical collection retention count. Values at or below zero use `2`. |
 
 Without `--allow-incomplete`, an incomplete crawl stops before publication. If

@@ -27,8 +27,71 @@ type Store struct{ client *qdrant.Client }
 const (
 	denseVectorName    = "dense"
 	sparseVectorName   = "sparse"
-	indexSchemaVersion = 2
+	indexSchemaVersion = 3
 )
+
+func (s *Store) LoadCachedDenseVectors(ctx context.Context, source, version, embeddingProfile string, inputHashes []string) (map[string][]float32, error) {
+	result := map[string][]float32{}
+	if source == "" || embeddingProfile == "" || len(inputHashes) == 0 {
+		return result, nil
+	}
+	alias := aliasName(source, version)
+	aliases, err := s.client.ListAliases(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list Qdrant aliases: %w", err)
+	}
+	collection := ""
+	for _, item := range aliases {
+		if item.GetAliasName() == alias {
+			collection = item.GetCollectionName()
+			break
+		}
+	}
+	if collection == "" {
+		return result, nil
+	}
+	info, err := s.client.GetCollectionInfo(ctx, collection)
+	if err != nil {
+		return nil, fmt.Errorf("inspect cached Qdrant collection: %w", err)
+	}
+	metadata := info.GetConfig().GetMetadata()
+	if integerValue(metadata, "docuwarden_schema") != indexSchemaVersion || stringValue(metadata, "embedding_profile") != embeddingProfile {
+		return result, nil
+	}
+	wanted := make(map[string]bool, len(inputHashes))
+	for _, hash := range inputHashes {
+		wanted[hash] = true
+	}
+	iterator := s.client.ScrollAll(ctx, &qdrant.ScrollPoints{
+		CollectionName: collection, Limit: qdrant.PtrOf(uint32(256)),
+		WithPayload: qdrant.NewWithPayloadInclude("input_hash"),
+		WithVectors: qdrant.NewWithVectorsInclude(denseVectorName),
+	})
+	for {
+		points, err := iterator.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("load cached embeddings from Qdrant: %w", err)
+		}
+		for _, point := range points {
+			hash := stringValue(point.GetPayload(), "input_hash")
+			if !wanted[hash] || result[hash] != nil {
+				continue
+			}
+			named := point.GetVectors().GetVectors()
+			if named == nil || named.GetVectors()[denseVectorName] == nil {
+				continue
+			}
+			vector := named.GetVectors()[denseVectorName].GetData()
+			if len(vector) > 0 {
+				result[hash] = append([]float32(nil), vector...)
+			}
+		}
+	}
+	return result, nil
+}
 
 func New(cfg Config) (*Store, error) {
 	client, err := qdrant.NewClient(&qdrant.Config{Host: cfg.Host, Port: cfg.Port, APIKey: cfg.APIKey, UseTLS: cfg.UseTLS})
@@ -44,6 +107,9 @@ func (s *Store) ReplaceSnapshot(ctx context.Context, snapshot vectorstore.Snapsh
 	if snapshot.Source == "" || len(snapshot.Points) == 0 {
 		return errors.New("snapshot source and points are required")
 	}
+	if snapshot.EmbeddingProfile == "" {
+		return errors.New("snapshot embedding profile is required")
+	}
 	dimension := len(snapshot.Points[0].DenseVector)
 	if dimension == 0 {
 		return errors.New("snapshot vectors are empty")
@@ -51,6 +117,9 @@ func (s *Store) ReplaceSnapshot(ctx context.Context, snapshot vectorstore.Snapsh
 	for i, point := range snapshot.Points {
 		if point.Source != snapshot.Source || point.Version != snapshot.Version {
 			return fmt.Errorf("point %d metadata does not match snapshot", i)
+		}
+		if point.InputHash == "" {
+			return fmt.Errorf("point %d embedding input hash is required", i)
 		}
 		if len(point.DenseVector) != dimension {
 			return fmt.Errorf("point %d vector dimension mismatch", i)
@@ -65,7 +134,8 @@ func (s *Store) ReplaceSnapshot(ctx context.Context, snapshot vectorstore.Snapsh
 		"display_name": snapshot.DisplayName, "description": snapshot.Description, "tags": anyStrings(snapshot.Tags),
 		"seed_url": snapshot.SeedURL, "document_count": snapshot.DocumentCount, "chunk_count": len(snapshot.Points),
 		"complete": snapshot.Complete, "indexed_at": snapshot.IndexedAt.UTC().Format(time.RFC3339Nano),
-		"embedding_model": snapshot.EmbeddingModel,
+		"embedding_model":   snapshot.EmbeddingModel,
+		"embedding_profile": snapshot.EmbeddingProfile,
 	}
 	if err := s.client.CreateCollection(ctx, &qdrant.CreateCollection{
 		CollectionName: physical,
@@ -95,6 +165,7 @@ func (s *Store) ReplaceSnapshot(ctx context.Context, snapshot vectorstore.Snapsh
 			"source": point.Source, "version": point.Version, "url": point.URL, "title": point.Title,
 			"heading_path": headings, "chunk_index": point.ChunkIndex, "markdown": point.Markdown,
 			"content_hash": point.ContentHash, "crawled_at": point.CrawledAt.UTC().Format(time.RFC3339Nano),
+			"input_hash":       point.InputHash,
 			"allow_incomplete": snapshot.AllowIncomplete,
 			"index_schema":     indexSchemaVersion,
 		})

@@ -90,6 +90,7 @@ Configuration uses flags and environment variables. Secrets are environment-only
 - Default chunking: approximately 800 tokens with 100-token overlap. Heading paths are copied into each chunk; fenced code remains intact even when that creates an oversized chunk.
 - Derive Qdrant vector size from the first embedding batch, validate all vectors, and use cosine distance.
 - Voyage document embeddings use `input_type=document`; query embeddings use `input_type=query`.
+- Hash the exact dense embedding input for each chunk. Compatible vectors from the active source/version snapshot are reused by hash; duplicate misses are embedded once per run. Provider, normalized endpoint, model, input type, and input-format version form the compatibility fingerprint. Sparse vectors are always rebuilt locally.
 - Build each indexing run in a new physical collection. After successful upload and validation, atomically update Qdrant aliases using its [alias API](https://api.qdrant.tech/api-reference/aliases/update-aliases).
 - Maintain a version-specific alias and a source-default alias. Searching without `--version` uses the most recently indexed successful version for that source.
 - Discover active corpora from aliases and collection metadata. `sources` reports source/version coverage, while `documents` scrolls page metadata without loading vectors.

@@ -72,3 +72,25 @@ func TestVoyageContract(t *testing.T) {
 		t.Fatalf("vectors = %v", vectors)
 	}
 }
+
+func TestProfileFingerprintNormalizesEndpointAndCoversCompatibilityFields(t *testing.T) {
+	base := Profile{Provider: "OpenAI", Endpoint: "HTTPS://EMBED.EXAMPLE/api/", Model: "model", InputType: "document", InputFormatVersion: 1}
+	normalized := base
+	normalized.Provider = "openai"
+	normalized.Endpoint = "https://embed.example/api"
+	if base.Fingerprint() != normalized.Fingerprint() {
+		t.Fatal("equivalent endpoints produced different fingerprints")
+	}
+	changes := []Profile{
+		{Provider: "voyage", Endpoint: normalized.Endpoint, Model: normalized.Model, InputType: normalized.InputType, InputFormatVersion: 1},
+		{Provider: normalized.Provider, Endpoint: "https://other.example/api", Model: normalized.Model, InputType: normalized.InputType, InputFormatVersion: 1},
+		{Provider: normalized.Provider, Endpoint: normalized.Endpoint, Model: "model-2", InputType: normalized.InputType, InputFormatVersion: 1},
+		{Provider: normalized.Provider, Endpoint: normalized.Endpoint, Model: normalized.Model, InputType: "query", InputFormatVersion: 1},
+		{Provider: normalized.Provider, Endpoint: normalized.Endpoint, Model: normalized.Model, InputType: normalized.InputType, InputFormatVersion: 2},
+	}
+	for i, changed := range changes {
+		if changed.Fingerprint() == normalized.Fingerprint() {
+			t.Fatalf("compatibility change %d did not alter fingerprint", i)
+		}
+	}
+}

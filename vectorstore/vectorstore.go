@@ -17,6 +17,7 @@ type Point struct {
 	ChunkIndex  int
 	Markdown    string
 	ContentHash string
+	InputHash   string
 	CrawledAt   time.Time
 }
 
@@ -26,19 +27,20 @@ type SparseVector struct {
 }
 
 type Snapshot struct {
-	Source          string
-	Version         string
-	DisplayName     string
-	Description     string
-	Tags            []string
-	SeedURL         string
-	DocumentCount   int
-	Complete        bool
-	IndexedAt       time.Time
-	EmbeddingModel  string
-	Points          []Point
-	AllowIncomplete bool
-	Retention       int
+	Source           string
+	Version          string
+	DisplayName      string
+	Description      string
+	Tags             []string
+	SeedURL          string
+	DocumentCount    int
+	Complete         bool
+	IndexedAt        time.Time
+	EmbeddingModel   string
+	EmbeddingProfile string
+	Points           []Point
+	AllowIncomplete  bool
+	Retention        int
 }
 
 type Catalog struct {
@@ -107,6 +109,7 @@ type SearchRequest struct {
 }
 
 type VectorStore interface {
+	LoadCachedDenseVectors(ctx context.Context, source, version, embeddingProfile string, inputHashes []string) (map[string][]float32, error)
 	ReplaceSnapshot(ctx context.Context, snapshot Snapshot) error
 	Search(ctx context.Context, request SearchRequest) ([]Candidate, error)
 }

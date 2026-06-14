@@ -25,6 +25,9 @@ func (rerankerStub) Rerank(context.Context, string, []string) ([]rerank.Rank, er
 type storeStub struct{ limit int }
 
 func (*storeStub) ReplaceSnapshot(context.Context, vectorstore.Snapshot) error { return nil }
+func (*storeStub) LoadCachedDenseVectors(context.Context, string, string, string, []string) (map[string][]float32, error) {
+	return nil, nil
+}
 func (store *storeStub) Search(_ context.Context, request vectorstore.SearchRequest) ([]vectorstore.Candidate, error) {
 	store.limit = request.Limit
 	return []vectorstore.Candidate{{Point: vectorstore.Point{ID: "a", Source: request.Source, Version: request.Version, URL: "https://x/a", Title: "A", Markdown: "A body"}, DenseScore: .8, FusionScore: .02}, {Point: vectorstore.Point{ID: "b", Source: request.Source, Version: request.Version, URL: "https://x/b", Title: "B", HeadingPath: []string{"API", "Run"}, Markdown: "```go\nrun()\n```"}, DenseScore: .7, SparseScore: 2.1, FusionScore: .03}}, nil
@@ -81,6 +84,9 @@ func (orderedReranker) Rerank(_ context.Context, _ string, documents []string) (
 type dedupeStore struct{}
 
 func (*dedupeStore) ReplaceSnapshot(context.Context, vectorstore.Snapshot) error { return nil }
+func (*dedupeStore) LoadCachedDenseVectors(context.Context, string, string, string, []string) (map[string][]float32, error) {
+	return nil, nil
+}
 func (*dedupeStore) Search(context.Context, vectorstore.SearchRequest) ([]vectorstore.Candidate, error) {
 	return []vectorstore.Candidate{
 		{Point: vectorstore.Point{ID: "1", URL: "https://x/a", Markdown: "runtime config public values and private values"}, FusionScore: .03},

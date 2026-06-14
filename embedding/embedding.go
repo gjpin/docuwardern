@@ -3,13 +3,56 @@ package embedding
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
+	"path"
 	"sort"
 	"strings"
 )
+
+const InputFormatVersion = 1
+
+type Profile struct {
+	Provider           string
+	Endpoint           string
+	Model              string
+	InputType          string
+	InputFormatVersion int
+}
+
+func (profile Profile) Fingerprint() string {
+	version := profile.InputFormatVersion
+	if version == 0 {
+		version = InputFormatVersion
+	}
+	value := fmt.Sprintf("provider=%s\nendpoint=%s\nmodel=%s\ninput_type=%s\ninput_format=%d",
+		strings.ToLower(strings.TrimSpace(profile.Provider)), normalizeEndpoint(profile.Endpoint),
+		strings.TrimSpace(profile.Model), strings.TrimSpace(profile.InputType), version)
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
+}
+
+func normalizeEndpoint(endpoint string) string {
+	value := strings.TrimSpace(endpoint)
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return strings.TrimRight(value, "/")
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	parsed.Host = strings.ToLower(parsed.Host)
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	parsed.Path = strings.TrimSuffix(path.Clean("/"+strings.TrimPrefix(parsed.Path, "/")), "/")
+	if parsed.Path == "." || parsed.Path == "/" {
+		parsed.Path = ""
+	}
+	return parsed.String()
+}
 
 type Embedder interface {
 	Embed(ctx context.Context, texts []string) ([][]float32, error)

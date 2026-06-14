@@ -134,6 +134,7 @@ func newRetryCommand() *cobra.Command {
 
 func newIndexCommand(providers *providerFlags) *cobra.Command {
 	var allowIncomplete bool
+	var forceReembed bool
 	var retention, batchSize int
 	command := &cobra.Command{Use: "index <artifact-dir>", Args: cobra.ExactArgs(1), RunE: func(command *cobra.Command, args []string) error {
 		service, closeStore, err := providers.indexService()
@@ -142,9 +143,10 @@ func newIndexCommand(providers *providerFlags) *cobra.Command {
 		}
 		defer closeStore()
 		service.Progress = progressWriter(command.ErrOrStderr())
-		return service.Index(command.Context(), args[0], app.IndexOptions{AllowIncomplete: allowIncomplete, Retention: retention, BatchSize: batchSize, EmbeddingModel: providers.embeddingModel})
+		return service.Index(command.Context(), args[0], providers.indexOptions(allowIncomplete, forceReembed, retention, batchSize))
 	}}
 	command.Flags().BoolVar(&allowIncomplete, "allow-incomplete", false, "publish an incomplete crawl artifact")
+	command.Flags().BoolVar(&forceReembed, "force-reembed", false, "bypass compatible cached embeddings")
 	command.Flags().IntVar(&retention, "snapshot-retention", 2, "number of recent physical snapshots to retain")
 	command.Flags().IntVar(&batchSize, "embedding-batch-size", 64, "texts per embedding request")
 	return command
@@ -153,6 +155,7 @@ func newIndexCommand(providers *providerFlags) *cobra.Command {
 func newIngestCommand(providers *providerFlags) *cobra.Command {
 	var flags scrapeFlags
 	var allowIncomplete bool
+	var forceReembed bool
 	var retention, batchSize int
 	command := &cobra.Command{Use: "ingest <url>", Args: cobra.ExactArgs(1), RunE: func(command *cobra.Command, args []string) error {
 		if err := flags.validate(); err != nil {
@@ -164,10 +167,11 @@ func newIngestCommand(providers *providerFlags) *cobra.Command {
 		}
 		defer closeStore()
 		service.Progress = progressWriter(command.ErrOrStderr())
-		return service.Ingest(command.Context(), flags.config(args[0]), flags.outputPath(), app.IndexOptions{AllowIncomplete: allowIncomplete, Retention: retention, BatchSize: batchSize, EmbeddingModel: providers.embeddingModel})
+		return service.Ingest(command.Context(), flags.config(args[0]), flags.outputPath(), providers.indexOptions(allowIncomplete, forceReembed, retention, batchSize))
 	}}
 	flags.add(command)
 	command.Flags().BoolVar(&allowIncomplete, "allow-incomplete", false, "publish successful pages from an incomplete crawl")
+	command.Flags().BoolVar(&forceReembed, "force-reembed", false, "bypass compatible cached embeddings")
 	command.Flags().IntVar(&retention, "snapshot-retention", 2, "number of recent physical snapshots to retain")
 	command.Flags().IntVar(&batchSize, "embedding-batch-size", 64, "texts per embedding request")
 	return command
@@ -387,6 +391,18 @@ func (flags providerFlags) indexService() (app.Service, func(), error) {
 		return app.Service{}, func() {}, err
 	}
 	return app.Service{Embedder: embedder, Store: store}, func() { _ = store.Close() }, nil
+}
+
+func (flags providerFlags) indexOptions(allowIncomplete, forceReembed bool, retention, batchSize int) app.IndexOptions {
+	endpoint := flags.embeddingEndpoint
+	if flags.embeddingProvider == "voyage" && endpoint == "" {
+		endpoint = "https://api.voyageai.com"
+	}
+	return app.IndexOptions{
+		AllowIncomplete: allowIncomplete, ForceReembed: forceReembed, Retention: retention, BatchSize: batchSize,
+		EmbeddingModel:   flags.embeddingModel,
+		EmbeddingProfile: embedding.Profile{Provider: flags.embeddingProvider, Endpoint: endpoint, Model: flags.embeddingModel, InputType: "document", InputFormatVersion: embedding.InputFormatVersion},
+	}
 }
 
 func (flags providerFlags) embedder(client *http.Client, inputType string) (embedding.Embedder, error) {
