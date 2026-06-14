@@ -17,6 +17,7 @@ output reference.
 - [Ingest Documentation](#ingest-documentation)
 - [Recover From A Failed Ingest](#recover-from-a-failed-ingest)
 - [Search](#search)
+- [Retrieve A Complete Page](#retrieve-a-complete-page)
 - [Validate The Index](#validate-the-index)
 - [Configuration](#configuration)
 - [Development](#development)
@@ -27,8 +28,8 @@ output reference.
   boundary, with concurrent workers, throttling, retries, and crawl reports.
 - Stores reusable Markdown artifacts so failed pages can be retried and
   indexing can resume without repeating a successful crawl.
-- Creates heading-aware chunks that preserve source URLs, heading hierarchy,
-  code fences, and version metadata.
+- Creates heading-aware searchable chunks and stores one vectorless complete
+  Markdown record for every crawled page.
 - Combines dense semantic and sparse lexical retrieval in Qdrant, then reranks
   and deduplicates results into prompt-ready Markdown or structured JSON.
 - Publishes versioned indexes through atomic Qdrant alias updates, reuses
@@ -42,9 +43,9 @@ output reference.
 ## Agent Skill
 
 The bundled [Docuwarden documentation search skill](skills/docuwarden-docs/SKILL.md)
-instructs coding agents to discover indexed sources and search them with
-Docuwarden before falling back to the web. It is search-only and does not allow
-agents to scrape, ingest, or index documentation.
+instructs coding agents to discover indexed sources, search them, and retrieve
+known complete pages with Docuwarden before falling back to the web. It does
+not allow agents to scrape, ingest, or index documentation.
 
 ## Quick Starts
 
@@ -281,6 +282,21 @@ Use `--format json` for machine-readable results. Search defaults to hybrid
 dense and sparse retrieval followed by reranking. Omitting `--version` searches
 the most recently indexed successful version for the source.
 
+## Retrieve A Complete Page
+
+Use the exact URL returned by `search` or `documents` to retrieve the original
+stored Markdown. This does not contact the source website or invoke embedding
+or reranking providers.
+
+```sh
+./bin/docuwarden get 'https://nuxt.com/docs/4.x/guide' \
+  --source nuxt \
+  --version 4.x
+```
+
+Omitting `--version` uses the source's default version. Collections created by
+older Docuwarden versions must be re-indexed before they support `get`.
+
 ## Validate The Index
 
 For local Qdrant, open <http://localhost:6333/dashboard>. In Qdrant Cloud, open
@@ -290,9 +306,9 @@ Confirm that:
 
 1. A collection named like `<source>__<version>__snapshot_<timestamp>_<suffix>`
    exists and has a green status.
-2. Its point count is greater than zero.
+2. Its point count equals the searchable chunk count plus the document count.
 3. The collection defines named `dense` and `sparse` vectors.
-4. Point payloads contain fields such as `source`, `version`, `url`, `title`,
+4. Point payloads include `point_kind` plus fields such as `source`, `version`, `url`, `title`,
    `heading_path`, `chunk_index`, `markdown`, `content_hash`, and `crawled_at`.
 
 Docuwarden publishes a new physical collection before switching stable aliases,

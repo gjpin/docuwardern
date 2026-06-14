@@ -83,6 +83,18 @@ func TestCompiledCLIWorkflow(t *testing.T) {
 	if !strings.Contains(v1JSON, `"version": "v1"`) || strings.Contains(v1JSON, "new-install") {
 		t.Fatalf("explicit search:\n%s", v1JSON)
 	}
+	v1Page := run(t, binary, append(base, "get", docs.URL+"/docs/v1/install", "--source", source, "--version", "v1")...)
+	if !strings.Contains(v1Page, "old-install --stable") || strings.Contains(v1Page, "new-install") {
+		t.Fatalf("v1 page:\n%s", v1Page)
+	}
+	v2Page := run(t, binary, append(base, "get", docs.URL+"/docs/v2/install", "--source", source)...)
+	if !strings.Contains(v2Page, "new-install --fast") || strings.Contains(v2Page, "old-install") {
+		t.Fatalf("default page:\n%s", v2Page)
+	}
+	missing := exec.Command(binary, append(base, "get", docs.URL+"/docs/v2/missing", "--source", source)...)
+	if output, err := missing.CombinedOutput(); err == nil || !strings.Contains(string(output), "documents") || !strings.Contains(string(output), "search") {
+		t.Fatalf("missing get error = %v output = %s", err, output)
+	}
 	text := run(t, binary, append(base, "search", "current fast install", "--source", source, "--format", "text")...)
 	if !strings.Contains(text, "Source:") || !strings.Contains(text, "```") {
 		t.Fatalf("text search:\n%s", text)

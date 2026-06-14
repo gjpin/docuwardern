@@ -137,6 +137,36 @@ func TestDocumentsRequiresSourceBeforeConnecting(t *testing.T) {
 	}
 }
 
+func TestGetRequiresSourceBeforeConnecting(t *testing.T) {
+	command := newRoot(&bytes.Buffer{}, &bytes.Buffer{})
+	command.SetArgs([]string{"get", "https://example.com/docs"})
+	if err := command.Execute(); err == nil || !strings.Contains(err.Error(), "--source is required") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestGetRequiresExactlyOneURL(t *testing.T) {
+	for _, args := range [][]string{{"get", "--source", "docs"}, {"get", "a", "b", "--source", "docs"}} {
+		command := newRoot(&bytes.Buffer{}, &bytes.Buffer{})
+		command.SetArgs(args)
+		if err := command.Execute(); err == nil {
+			t.Fatalf("%v unexpectedly succeeded", args)
+		}
+	}
+}
+
+func TestWriteMarkdownPreservesContentAndAddsOnlyMissingFinalNewline(t *testing.T) {
+	for _, test := range []struct{ input, want string }{{"# Page\n", "# Page\n"}, {"# Page", "# Page\n"}, {"", "\n"}} {
+		var output bytes.Buffer
+		if err := writeMarkdown(&output, test.input); err != nil {
+			t.Fatal(err)
+		}
+		if output.String() != test.want {
+			t.Fatalf("writeMarkdown(%q) = %q, want %q", test.input, output.String(), test.want)
+		}
+	}
+}
+
 func TestVoyageProviderFactories(t *testing.T) {
 	t.Setenv("VOYAGE_API_KEY", "voyage-key")
 	t.Setenv("DOCUWARDEN_EMBEDDING_API_KEY", "embedding-key")

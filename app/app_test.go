@@ -77,6 +77,9 @@ func TestIndexBuildsDeterministicSnapshot(t *testing.T) {
 	if store.snapshot.Source != "docs" || store.snapshot.Version != "v1" || len(store.snapshot.Points) == 0 {
 		t.Fatalf("snapshot = %+v", store.snapshot)
 	}
+	if len(store.snapshot.Documents) != 1 || store.snapshot.Documents[0].Markdown != body {
+		t.Fatalf("stored documents = %#v", store.snapshot.Documents)
+	}
 	if len(store.snapshot.Points[0].Sparse.Indices) == 0 {
 		t.Fatal("sparse vector missing")
 	}
@@ -84,11 +87,25 @@ func TestIndexBuildsDeterministicSnapshot(t *testing.T) {
 		t.Fatalf("snapshot catalog metadata = %+v", store.snapshot)
 	}
 	firstID := store.snapshot.Points[0].ID
+	firstDocumentID := store.snapshot.Documents[0].ID
 	if err := service.Index(context.Background(), dir, IndexOptions{EmbeddingModel: "example-embed"}); err != nil {
 		t.Fatal(err)
 	}
 	if store.snapshot.Points[0].ID != firstID {
 		t.Fatal("point ID is not deterministic")
+	}
+	if store.snapshot.Documents[0].ID != firstDocumentID {
+		t.Fatal("document point ID is not deterministic")
+	}
+}
+
+func TestDocumentPointIDDependsOnSourceAndURL(t *testing.T) {
+	base := vectorstore.DocumentPointID("docs", "https://example.com/page")
+	if base != vectorstore.DocumentPointID("docs", "https://example.com/page") {
+		t.Fatal("document point ID is not deterministic")
+	}
+	if base == vectorstore.DocumentPointID("other", "https://example.com/page") || base == vectorstore.DocumentPointID("docs", "https://example.com/other") {
+		t.Fatal("document point IDs collided across source or URL")
 	}
 }
 

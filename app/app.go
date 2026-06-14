@@ -254,9 +254,16 @@ func (service Service) Index(ctx context.Context, artifactDir string, options In
 		sparseEncoder = sparse.LexicalEncoder{}
 	}
 	var points []vectorstore.Point
+	documents := make([]vectorstore.Document, 0, len(artifact.Manifest.Documents))
 	service.progress("index: chunking %d document(s)", len(artifact.Manifest.Documents))
 	for _, document := range artifact.Manifest.Documents {
-		chunks, err := chunk.Split(artifact.Markdown[document.ID], options.Chunk)
+		markdown := artifact.Markdown[document.ID]
+		documents = append(documents, vectorstore.Document{
+			ID: vectorstore.DocumentPointID(artifact.Manifest.Source.SourceID, document.URL), Source: artifact.Manifest.Source.SourceID,
+			Version: artifact.Manifest.Source.Version, URL: document.URL, Title: document.Title, Markdown: markdown,
+			ContentHash: document.ContentHash, CrawledAt: document.CrawledAt,
+		})
+		chunks, err := chunk.Split(markdown, options.Chunk)
 		if err != nil {
 			return fmt.Errorf("chunk %s: %w", document.URL, err)
 		}
@@ -349,7 +356,7 @@ func (service Service) Index(ctx context.Context, artifactDir string, options In
 		Tags: artifact.Manifest.Source.Tags, SeedURL: artifact.Manifest.Source.SeedURL,
 		DocumentCount: len(artifact.Manifest.Documents), Complete: artifact.Manifest.Complete,
 		IndexedAt: time.Now().UTC(), EmbeddingModel: options.EmbeddingModel, EmbeddingProfile: profileFingerprint,
-		Points: points, AllowIncomplete: options.AllowIncomplete, Retention: options.Retention,
+		Points: points, Documents: documents, AllowIncomplete: options.AllowIncomplete, Retention: options.Retention,
 	})
 	if err != nil {
 		return err

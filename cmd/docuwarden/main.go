@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -68,7 +69,7 @@ func newRoot(stdout, stderr io.Writer) *cobra.Command {
 	root.SetOut(stdout)
 	root.SetErr(stderr)
 	providers.add(root)
-	root.AddCommand(newScrapeCommand(&providers), newRetryCommand(), newIndexCommand(&providers), newIngestCommand(&providers), newSearchCommand(&providers), newSourcesCommand(&providers), newDocumentsCommand(&providers))
+	root.AddCommand(newScrapeCommand(&providers), newRetryCommand(), newIndexCommand(&providers), newIngestCommand(&providers), newSearchCommand(&providers), newGetCommand(&providers), newSourcesCommand(&providers), newDocumentsCommand(&providers))
 	return root
 }
 
@@ -230,6 +231,48 @@ func newDocumentsCommand(providers *providerFlags) *cobra.Command {
 	command.Flags().StringVar(&version, "version", "", "exact documentation version")
 	command.Flags().StringVar(&format, "format", "json", "output format: json or text")
 	return command
+}
+
+func newGetCommand(providers *providerFlags) *cobra.Command {
+	var source, version string
+	command := &cobra.Command{Use: "get <url>", Short: "Retrieve a complete indexed page", Args: cobra.ExactArgs(1), RunE: func(command *cobra.Command, args []string) error {
+		if source == "" {
+			return fmt.Errorf("--source is required")
+		}
+		store, err := providers.store()
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		document, err := store.GetDocument(command.Context(), source, version, args[0])
+		if err != nil {
+			var notFound *vectorstore.DocumentNotFoundError
+			var reindex *vectorstore.ReindexRequiredError
+			switch {
+			case errors.As(err, &notFound):
+				return fmt.Errorf("%w; use 'docuwarden documents --source %s' or search to find the canonical page URL", err, source)
+			case errors.As(err, &reindex):
+				return fmt.Errorf("%w; re-run 'docuwarden index' or 'docuwarden ingest' for this source", err)
+			default:
+				return err
+			}
+		}
+		return writeMarkdown(command.OutOrStdout(), document.Markdown)
+	}}
+	command.Flags().StringVar(&source, "source", "", "source ID")
+	command.Flags().StringVar(&version, "version", "", "exact documentation version")
+	return command
+}
+
+func writeMarkdown(writer io.Writer, markdown string) error {
+	if _, err := io.WriteString(writer, markdown); err != nil {
+		return err
+	}
+	if !strings.HasSuffix(markdown, "\n") {
+		_, err := io.WriteString(writer, "\n")
+		return err
+	}
+	return nil
 }
 
 func writeCatalog(writer io.Writer, catalog vectorstore.Catalog, format string) error {

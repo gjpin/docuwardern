@@ -27,7 +27,7 @@ type Store struct{ client *qdrant.Client }
 const (
 	denseVectorName    = "dense"
 	sparseVectorName   = "sparse"
-	indexSchemaVersion = 3
+	indexSchemaVersion = 4
 )
 
 func (s *Store) LoadCachedDenseVectors(ctx context.Context, source, version, embeddingProfile string, inputHashes []string) (map[string][]float32, error) {
@@ -64,7 +64,7 @@ func (s *Store) LoadCachedDenseVectors(ctx context.Context, source, version, emb
 	}
 	iterator := s.client.ScrollAll(ctx, &qdrant.ScrollPoints{
 		CollectionName: collection, Limit: qdrant.PtrOf(uint32(256)),
-		WithPayload: qdrant.NewWithPayloadInclude("input_hash"),
+		WithPayload: qdrant.NewWithPayloadInclude("point_kind", "input_hash"),
 		WithVectors: qdrant.NewWithVectorsInclude(denseVectorName),
 	})
 	for {
@@ -76,6 +76,9 @@ func (s *Store) LoadCachedDenseVectors(ctx context.Context, source, version, emb
 			return nil, fmt.Errorf("load cached embeddings from Qdrant: %w", err)
 		}
 		for _, point := range points {
+			if stringValue(point.GetPayload(), "point_kind") != string(vectorstore.PointKindChunk) {
+				continue
+			}
 			hash := stringValue(point.GetPayload(), "input_hash")
 			if !wanted[hash] || result[hash] != nil {
 				continue
@@ -111,8 +114,8 @@ func New(cfg Config) (*Store, error) {
 func (s *Store) Close() error { return s.client.Close() }
 
 func (s *Store) ReplaceSnapshot(ctx context.Context, snapshot vectorstore.Snapshot) (err error) {
-	if snapshot.Source == "" || len(snapshot.Points) == 0 {
-		return errors.New("snapshot source and points are required")
+	if snapshot.Source == "" || len(snapshot.Points) == 0 || len(snapshot.Documents) == 0 {
+		return errors.New("snapshot source, points, and documents are required")
 	}
 	if snapshot.EmbeddingProfile == "" {
 		return errors.New("snapshot embedding profile is required")
@@ -135,11 +138,19 @@ func (s *Store) ReplaceSnapshot(ctx context.Context, snapshot vectorstore.Snapsh
 			return fmt.Errorf("point %d sparse vector is invalid", i)
 		}
 	}
+	for i, document := range snapshot.Documents {
+		if document.ID == "" || document.Source != snapshot.Source || document.Version != snapshot.Version || document.URL == "" {
+			return fmt.Errorf("document %d metadata does not match snapshot", i)
+		}
+	}
+	if snapshot.DocumentCount != len(snapshot.Documents) {
+		return fmt.Errorf("snapshot document count mismatch: metadata %d, documents %d", snapshot.DocumentCount, len(snapshot.Documents))
+	}
 	physical := physicalName(snapshot.Source, snapshot.Version)
 	metadata := map[string]any{
 		"docuwarden_schema": indexSchemaVersion, "source": snapshot.Source, "version": snapshot.Version,
 		"display_name": snapshot.DisplayName, "description": snapshot.Description, "tags": anyStrings(snapshot.Tags),
-		"seed_url": snapshot.SeedURL, "document_count": snapshot.DocumentCount, "chunk_count": len(snapshot.Points),
+		"seed_url": snapshot.SeedURL, "document_count": len(snapshot.Documents), "chunk_count": len(snapshot.Points),
 		"complete": snapshot.Complete, "indexed_at": snapshot.IndexedAt.UTC().Format(time.RFC3339Nano),
 		"embedding_model":   snapshot.EmbeddingModel,
 		"embedding_profile": snapshot.EmbeddingProfile,
@@ -169,7 +180,8 @@ func (s *Store) ReplaceSnapshot(ctx context.Context, snapshot vectorstore.Snapsh
 			headings[j] = value
 		}
 		payload, payloadErr := qdrant.TryValueMap(map[string]any{
-			"source": point.Source, "version": point.Version, "url": point.URL, "title": point.Title,
+			"point_kind": string(vectorstore.PointKindChunk),
+			"source":     point.Source, "version": point.Version, "url": point.URL, "title": point.Title,
 			"heading_path": headings, "chunk_index": point.ChunkIndex, "markdown": point.Markdown,
 			"content_hash": point.ContentHash, "crawled_at": point.CrawledAt.UTC().Format(time.RFC3339Nano),
 			"input_hash":       point.InputHash,
@@ -184,6 +196,23 @@ func (s *Store) ReplaceSnapshot(ctx context.Context, snapshot vectorstore.Snapsh
 			sparseVectorName: qdrant.NewVectorSparse(point.Sparse.Indices, point.Sparse.Values),
 		}), Payload: payload}
 	}
+	documentPoints := make([]*qdrant.PointStruct, len(snapshot.Documents))
+	for i, document := range snapshot.Documents {
+		payload, payloadErr := qdrant.TryValueMap(map[string]any{
+			"point_kind": string(vectorstore.PointKindDocument), "source": document.Source, "version": document.Version,
+			"url": document.URL, "title": document.Title, "markdown": document.Markdown, "content_hash": document.ContentHash,
+			"crawled_at": document.CrawledAt.UTC().Format(time.RFC3339Nano), "allow_incomplete": snapshot.AllowIncomplete,
+			"index_schema": indexSchemaVersion,
+		})
+		if payloadErr != nil {
+			return fmt.Errorf("encode document payload: %w", payloadErr)
+		}
+		documentPoints[i] = &qdrant.PointStruct{
+			Id:      qdrant.NewID(uuidFromHash(document.ID)),
+			Vectors: qdrant.NewVectorsMap(map[string]*qdrant.Vector{}),
+			Payload: payload,
+		}
+	}
 	wait := true
 	for start := 0; start < len(points); start += 128 {
 		end := min(start+128, len(points))
@@ -191,12 +220,30 @@ func (s *Store) ReplaceSnapshot(ctx context.Context, snapshot vectorstore.Snapsh
 			return fmt.Errorf("upload Qdrant points: %w", err)
 		}
 	}
+	for start := 0; start < len(documentPoints); start += 128 {
+		end := min(start+128, len(documentPoints))
+		if _, err := s.client.Upsert(ctx, &qdrant.UpsertPoints{CollectionName: physical, Wait: &wait, Points: documentPoints[start:end]}); err != nil {
+			return fmt.Errorf("upload Qdrant document points: %w", err)
+		}
+	}
 	count, err := s.client.Count(ctx, &qdrant.CountPoints{CollectionName: physical, Exact: qdrant.PtrOf(true)})
 	if err != nil {
 		return fmt.Errorf("validate Qdrant collection: %w", err)
 	}
-	if count != uint64(len(points)) {
-		return fmt.Errorf("Qdrant point count mismatch: uploaded %d, found %d", len(points), count)
+	expectedCount := len(points) + len(documentPoints)
+	if count != uint64(expectedCount) {
+		return fmt.Errorf("Qdrant point count mismatch: uploaded %d chunks and %d documents, found %d total points", len(points), len(documentPoints), count)
+	}
+	chunkCount, err := s.countPointKind(ctx, physical, vectorstore.PointKindChunk)
+	if err != nil {
+		return fmt.Errorf("validate Qdrant chunk count: %w", err)
+	}
+	documentCount, err := s.countPointKind(ctx, physical, vectorstore.PointKindDocument)
+	if err != nil {
+		return fmt.Errorf("validate Qdrant document count: %w", err)
+	}
+	if chunkCount != uint64(len(points)) || documentCount != uint64(len(documentPoints)) {
+		return fmt.Errorf("Qdrant point-kind count mismatch: uploaded %d chunks and %d documents, found %d chunks and %d documents", len(points), len(documentPoints), chunkCount, documentCount)
 	}
 	aliases, err := s.client.ListAliases(ctx)
 	if err != nil {
@@ -230,6 +277,30 @@ func (s *Store) ReplaceSnapshot(ctx context.Context, snapshot vectorstore.Snapsh
 	// Publication is already atomic and successful; stale-snapshot cleanup is best effort.
 	_ = s.cleanup(ctx, snapshot.Source, retention)
 	return nil
+}
+
+func (s *Store) countPointKind(ctx context.Context, collection string, kind vectorstore.PointKind) (uint64, error) {
+	iterator := s.client.ScrollAll(ctx, &qdrant.ScrollPoints{
+		CollectionName: collection,
+		Limit:          qdrant.PtrOf(uint32(256)),
+		WithPayload:    qdrant.NewWithPayloadInclude("point_kind"),
+		WithVectors:    qdrant.NewWithVectors(false),
+	})
+	var count uint64
+	for {
+		points, err := iterator.Next()
+		if errors.Is(err, io.EOF) {
+			return count, nil
+		}
+		if err != nil {
+			return 0, err
+		}
+		for _, point := range points {
+			if stringValue(point.GetPayload(), "point_kind") == string(kind) {
+				count++
+			}
+		}
+	}
 }
 
 func (s *Store) ListSources(ctx context.Context) (vectorstore.Catalog, error) {
@@ -298,10 +369,10 @@ func (s *Store) ListDocuments(ctx context.Context, source, version string) (vect
 	collection := aliasName(source, version)
 	iterator := s.client.ScrollAll(ctx, &qdrant.ScrollPoints{
 		CollectionName: collection, Limit: qdrant.PtrOf(uint32(256)),
-		WithPayload: qdrant.NewWithPayloadInclude("source", "version", "url", "title", "crawled_at"),
+		WithPayload: qdrant.NewWithPayloadInclude("point_kind", "source", "version", "url", "title", "crawled_at"),
 		WithVectors: qdrant.NewWithVectors(false),
 	})
-	documents := map[string]vectorstore.CatalogDocument{}
+	var documents []vectorstore.CatalogDocument
 	resolvedVersion := version
 	for {
 		points, err := iterator.Next()
@@ -313,21 +384,63 @@ func (s *Store) ListDocuments(ctx context.Context, source, version string) (vect
 		}
 		for _, point := range points {
 			payload := point.GetPayload()
+			if stringValue(payload, "point_kind") != string(vectorstore.PointKindDocument) {
+				continue
+			}
 			if resolvedVersion == "" {
 				resolvedVersion = stringValue(payload, "version")
 			}
 			url := stringValue(payload, "url")
 			if url != "" {
-				documents[url] = vectorstore.CatalogDocument{URL: url, Title: stringValue(payload, "title"), CrawledAt: stringValue(payload, "crawled_at")}
+				documents = append(documents, vectorstore.CatalogDocument{URL: url, Title: stringValue(payload, "title"), CrawledAt: stringValue(payload, "crawled_at")})
 			}
 		}
 	}
 	result := vectorstore.DocumentCatalog{SchemaVersion: 1, Source: source, Version: resolvedVersion}
-	for _, document := range documents {
-		result.Documents = append(result.Documents, document)
-	}
+	result.Documents = documents
 	sort.Slice(result.Documents, func(i, j int) bool { return result.Documents[i].URL < result.Documents[j].URL })
 	return result, nil
+}
+
+func (s *Store) GetDocument(ctx context.Context, source, version, url string) (vectorstore.Document, error) {
+	if source == "" || url == "" {
+		return vectorstore.Document{}, errors.New("source and URL are required")
+	}
+	alias := aliasName(source, version)
+	aliases, err := s.client.ListAliases(ctx)
+	if err != nil {
+		return vectorstore.Document{}, fmt.Errorf("list Qdrant aliases: %w", err)
+	}
+	collection := ""
+	for _, item := range aliases {
+		if item.GetAliasName() == alias {
+			collection = item.GetCollectionName()
+			break
+		}
+	}
+	if collection == "" {
+		return vectorstore.Document{}, &vectorstore.SourceNotFoundError{Source: source, Version: version}
+	}
+	info, err := s.client.GetCollectionInfo(ctx, collection)
+	if err != nil {
+		return vectorstore.Document{}, fmt.Errorf("inspect Qdrant collection: %w", err)
+	}
+	schema := int(integerValue(info.GetConfig().GetMetadata(), "docuwarden_schema"))
+	if schema < indexSchemaVersion {
+		return vectorstore.Document{}, &vectorstore.ReindexRequiredError{Source: source, Version: version, SchemaVersion: schema}
+	}
+	points, err := s.client.Get(ctx, &qdrant.GetPoints{
+		CollectionName: alias, Ids: []*qdrant.PointId{qdrant.NewID(uuidFromHash(vectorstore.DocumentPointID(source, url)))},
+		WithPayload: qdrant.NewWithPayload(true), WithVectors: qdrant.NewWithVectors(false),
+	})
+	if err != nil {
+		return vectorstore.Document{}, fmt.Errorf("retrieve document from Qdrant: %w", err)
+	}
+	if len(points) == 0 || stringValue(points[0].GetPayload(), "point_kind") != string(vectorstore.PointKindDocument) {
+		return vectorstore.Document{}, &vectorstore.DocumentNotFoundError{Source: source, Version: version, URL: url}
+	}
+	payload := points[0].GetPayload()
+	return vectorstore.Document{ID: pointIDString(points[0].GetId()), Source: stringValue(payload, "source"), Version: stringValue(payload, "version"), URL: stringValue(payload, "url"), Title: stringValue(payload, "title"), Markdown: stringValue(payload, "markdown"), ContentHash: stringValue(payload, "content_hash"), CrawledAt: timeValue(payload, "crawled_at")}, nil
 }
 
 func catalogChunkCount(metadata map[string]*qdrant.Value, fallback uint64) int {

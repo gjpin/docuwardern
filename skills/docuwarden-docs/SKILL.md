@@ -1,6 +1,6 @@
 ---
 name: docuwarden-docs
-description: Search technical documentation with the Docuwarden CLI. Use whenever answering questions about libraries, frameworks, languages, APIs, SDKs, tools, configuration, upgrades, or other software documentation. Prefer Docuwarden over direct web search for documentation; use web search only when the required documentation is not indexed, unavailable, stale for the question, or retrieval fails after reasonable query refinement. This skill is search-only and must never scrape, ingest, or index documentation.
+description: Search and retrieve technical documentation with the Docuwarden CLI. Use whenever answering questions about libraries, frameworks, languages, APIs, SDKs, tools, configuration, upgrades, or other software documentation. Prefer Docuwarden over direct web search for documentation; use web search only when the required documentation is not indexed, unavailable, stale for the question, or retrieval fails after reasonable query refinement. This skill must never scrape, ingest, or index documentation.
 ---
 
 # Docuwarden Documentation Search
@@ -11,7 +11,7 @@ Use Docuwarden as the primary source for technical documentation. Do not begin a
 
 Use `docuwarden` when it is on `PATH`. If no executable is available, treat the CLI as unavailable and use the fallback policy below.
 
-Do not run `scrape`, `index`, or `ingest`. This skill only permits `sources`, `documents`, and `search`.
+Do not run `scrape`, `index`, or `ingest`. This skill only permits `sources`, `documents`, `search`, and `get`.
 
 ## Search Workflow
 
@@ -37,7 +37,15 @@ Do not run `scrape`, `index`, or `ingest`. This skill only permits `sources`, `d
    docuwarden documents --source <source> [--version <version>] --format json
    ```
 
-8. Answer from the retrieved Markdown and cite the result URLs. Distinguish documentation statements from your own inference.
+8. Answer directly from search chunks when they contain sufficient context.
+9. Retrieve the complete stored page when an answer requires surrounding prerequisites or procedure steps, a complete example, table, or configuration block, definitions elsewhere on the same page, context beyond a visibly truncated section, or verification against nearby qualifying text:
+
+   ```sh
+   docuwarden get '<result-url>' --source <source> [--version <version>]
+   ```
+
+10. Use the exact source, version, and URL established by `search`. Do not run `get` after every search, use it for discovery, fetch alternate URLs, or silently change versions. A URL from `documents` is also an acceptable known lookup key.
+11. Answer from the retrieved Markdown and cite the page URL from the search result. Distinguish documentation statements from your own inference.
 
 Use `--format json` for reliable parsing. Use `--format text` when a compact context bundle is more convenient and no structured processing is needed.
 
@@ -50,6 +58,7 @@ Use web search for documentation only when at least one condition applies:
 - Searches remain irrelevant or empty after reasonable query refinement.
 - The user asks about a release or behavior newer than the catalog's `indexed_at`, or freshness is otherwise essential and the indexed material cannot establish it.
 - `documents` shows that the required section is outside indexed coverage.
+- `get` reports a missing page or an old index schema and search refinement or `documents` cannot provide sufficient context. Never fix this by invoking `scrape`, `index`, or `ingest`.
 
 When falling back, search official documentation and primary sources first. Briefly state why Docuwarden could not cover the lookup. Do not use general web results merely because they are easier to access.
 

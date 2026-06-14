@@ -15,6 +15,7 @@ The available commands are:
 - `ingest`: run `scrape` and `index` as one workflow.
 - `sources`: list active indexed documentation sources and versions.
 - `documents`: list indexed pages for a source and version.
+- `get`: retrieve the complete stored Markdown for a known page URL.
 - `search`: retrieve and rerank indexed documentation.
 - `completion`: generate shell completion scripts.
 - `help`: display command help.
@@ -42,7 +43,7 @@ Global flags may appear before or after the subcommand.
 | `--reranker-provider <name>` | `DOCUWARDEN_RERANKER_PROVIDER` | `cohere` | Reranking adapter: `cohere` or `voyage`. |
 | `--reranker-endpoint <url>` | `DOCUWARDEN_RERANKER_ENDPOINT` | none | Reranking base URL. Required for `cohere`; Voyage defaults to `https://api.voyageai.com`. |
 | `--reranker-model <name>` | `DOCUWARDEN_RERANKER_MODEL` | none | Model sent in reranking requests. Required by `search`. |
-| `--qdrant-host <host>` | `DOCUWARDEN_QDRANT_HOST` | `localhost` | Qdrant gRPC host. Used by `index`, `ingest`, and `search`. |
+| `--qdrant-host <host>` | `DOCUWARDEN_QDRANT_HOST` | `localhost` | Qdrant gRPC host. Used by all index and retrieval commands. |
 | `--qdrant-port <port>` | `DOCUWARDEN_QDRANT_PORT` | `6334` | Qdrant gRPC port. |
 | `--qdrant-tls` | `DOCUWARDEN_QDRANT_TLS` | `false` | Connect to Qdrant using TLS. The environment value accepts Go boolean forms such as `true`, `false`, `1`, and `0`. |
 | `--provider-timeout <duration>` | none | `1m` | Timeout for each embedding or reranking HTTP request. |
@@ -312,6 +313,26 @@ default alias is used. JSON output includes the resolved version and a stable
 ```sh
 ./docuwarden documents --source nuxt --version 4.x --format json
 ```
+
+## `get`
+
+```text
+docuwarden get <url> --source <id> [--version <version>]
+```
+
+Retrieves one complete page directly from Qdrant by its exact stored URL. The
+command does not access the website, embed content, rerank, or perform another
+search. Without `--version`, the source-default alias is used. Stdout contains
+only the stored Markdown, with a final newline added only when absent.
+
+Use a canonical URL returned by `search` or `documents`:
+
+```sh
+./docuwarden get 'https://nuxt.com/docs/4.x/guide' --source nuxt --version 4.x
+```
+
+Indexes created before full-page storage was introduced return a reindex
+required error. Re-run `index` on the existing artifact or run `ingest` again.
 
 ## `search`
 

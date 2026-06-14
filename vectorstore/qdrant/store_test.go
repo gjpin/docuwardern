@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	qdrant "github.com/qdrant/go-client/qdrant"
+	"github.com/zero/docuwarden/vectorstore"
 )
 
 func TestDenseVectorDataSupportsCurrentAndLegacyResponses(t *testing.T) {
@@ -32,5 +33,15 @@ func TestPhysicalCollectionNameIncludesUnversionedLabel(t *testing.T) {
 	name := physicalName("Nuxt Docs", "")
 	if !strings.HasPrefix(name, "nuxt_docs__unversioned__snapshot_") {
 		t.Fatalf("name = %q", name)
+	}
+}
+
+func TestDocumentPointIDIsDeterministicAndDistinct(t *testing.T) {
+	base := vectorstore.DocumentPointID("nuxt", "https://nuxt.com/docs/guide")
+	if base != vectorstore.DocumentPointID("nuxt", "https://nuxt.com/docs/guide") {
+		t.Fatal("document ID changed for identical input")
+	}
+	if base == vectorstore.DocumentPointID("vue", "https://nuxt.com/docs/guide") || base == vectorstore.DocumentPointID("nuxt", "https://nuxt.com/docs/api") {
+		t.Fatal("document ID collided across source or URL")
 	}
 }

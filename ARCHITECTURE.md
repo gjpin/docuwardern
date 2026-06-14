@@ -6,7 +6,7 @@ Go module with a single `docuwarden` binary, independent packages for scraping, 
 
 Data flow:
 
-`website -> scrape artifact -> Markdown chunks -> dense + sparse vectors -> Qdrant hybrid search -> local reranking -> deduplicated CLI results`
+`website -> scrape artifact -> Markdown chunks + complete pages -> Qdrant -> hybrid chunk search or direct page retrieval`
 
 ## Key Modules
 
@@ -45,6 +45,10 @@ type VectorStore interface {
 	ReplaceSnapshot(ctx context.Context, snapshot Snapshot) error
 	Search(ctx context.Context, request SearchRequest) ([]Candidate, error)
 }
+
+type DocumentStore interface {
+	GetDocument(ctx context.Context, source, version, url string) (Document, error)
+}
 ```
 
 `SourceSpec` contains explicit source ID, seed URL, one content selector with optional retry fallbacks, and optional version.
@@ -55,7 +59,13 @@ Each artifact contains:
 - `documents/*.md`: cleaned Markdown with collision-safe deterministic filenames.
 - `report.json`: fetched, skipped, failed, redirected, and selector-missing pages.
 
-Qdrant points use named `dense` and `sparse` vectors. Dense embedding input includes title, heading path, URL, and Markdown content; payloads retain the original Markdown plus source metadata. Point IDs are deterministic from source/version/URL/content hash/chunk index.
+Qdrant chunk points use named `dense` and `sparse` vectors. Dense embedding
+input includes title, heading path, URL, and Markdown content. Each page also
+has one vectorless document point containing the exact artifact Markdown.
+Payloads distinguish them with `point_kind=chunk` or `point_kind=document`.
+Chunk IDs are deterministic from source/version/URL/content hash/chunk index;
+document IDs are deterministic from source and URL because versions occupy
+separate collections.
 
 ## CLI Contract
 
@@ -77,6 +87,8 @@ docuwarden sources [--format json|text]
 
 docuwarden documents --source <id>
   [--version <version>] [--format json|text]
+
+docuwarden get <url> --source <id> [--version <version>]
 ```
 
 Every anchor is considered for discovery. Links must remain under the normalized seed origin and path, so `https://nuxt.com/docs/4.x` accepts `/docs/4.x/getting-started/styling` but rejects `/docs/3.x` and unrelated site paths. Discovery runs before content extraction so selector-missing and conversion-failing HTML pages can still expand the crawl.
@@ -91,9 +103,16 @@ Configuration uses flags and environment variables. Secrets are environment-only
 - Derive Qdrant vector size from the first embedding batch, validate all vectors, and use cosine distance.
 - Voyage document embeddings use `input_type=document`; query embeddings use `input_type=query`.
 - Hash the exact dense embedding input for each chunk. Compatible vectors from the active source/version snapshot are reused by hash; duplicate misses are embedded once per run. Provider, normalized endpoint, model, input type, and input-format version form the compatibility fingerprint. Sparse vectors are always rebuilt locally.
-- Build each indexing run in a new physical collection. After successful upload and validation, atomically update Qdrant aliases using its [alias API](https://api.qdrant.tech/api-reference/aliases/update-aliases).
+- Build each indexing run in a new physical collection. Upload and validate all
+  chunk and document points before atomically updating Qdrant aliases using its
+  [alias API](https://api.qdrant.tech/api-reference/aliases/update-aliases).
 - Maintain a version-specific alias and a source-default alias. Searching without `--version` uses the most recently indexed successful version for that source.
-- Discover active corpora from aliases and collection metadata. `sources` reports source/version coverage, while `documents` scrolls page metadata without loading vectors.
+- Discover active corpora from aliases and collection metadata. `sources`
+  reports separate document and searchable chunk counts, while `documents`
+  reads vectorless document points without loading vectors.
+- `get` resolves the requested alias and retrieves the deterministic document
+  point by ID. It never scrolls, runs vector search, or falls back across
+  versions. Legacy schemas return a reindex-required error.
 - Search retrieves 40 hybrid candidates by default, fuses dense and sparse rankings with Reciprocal Rank Fusion, reranks them locally, suppresses near-duplicate chunks, and returns the best five.
 - JSON output includes rank, dense score, sparse score, fusion score, reranker score, source, version, URL, title, heading path, and Markdown content. Text output produces a compact Markdown context bundle.
 
