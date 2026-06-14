@@ -115,6 +115,59 @@ func TestNonHTMLFailsWithoutRetry(t *testing.T) {
 	}
 }
 
+func TestCrawlSkipsMarkdownLinksWithoutFetchingThem(t *testing.T) {
+	var markdownCalls atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/docs", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<main>Home</main><a href="/docs/guide.md">Markdown</a><a href="/docs/notes.MARKDOWN?raw=1">More Markdown</a><a href="/docs/page">Page</a>`)
+	})
+	mux.HandleFunc("/docs/guide.md", func(w http.ResponseWriter, r *http.Request) {
+		markdownCalls.Add(1)
+	})
+	mux.HandleFunc("/docs/notes.MARKDOWN", func(w http.ResponseWriter, r *http.Request) {
+		markdownCalls.Add(1)
+	})
+	mux.HandleFunc("/docs/page", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<main>Page</main>`)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	artifact, err := Crawl(context.Background(), Config{Source: corpus.SourceSpec{SourceID: "docs", SeedURL: server.URL + "/docs", ContentSelector: "main"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if markdownCalls.Load() != 0 {
+		t.Fatalf("Markdown requests = %d, want 0", markdownCalls.Load())
+	}
+	if len(artifact.Manifest.Documents) != 2 || len(artifact.Report.Skipped) != 2 || len(artifact.Report.Failed) != 0 {
+		t.Fatalf("documents=%d report=%+v", len(artifact.Manifest.Documents), artifact.Report)
+	}
+	for _, skipped := range artifact.Report.Skipped {
+		if skipped.Detail != "Markdown resource" {
+			t.Fatalf("skip = %+v", skipped)
+		}
+	}
+}
+
+func TestCrawlTargetsSkipsMarkdownInitialURL(t *testing.T) {
+	var markdownCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		markdownCalls.Add(1)
+	}))
+	defer server.Close()
+
+	artifact, err := CrawlTargets(context.Background(), Config{Source: corpus.SourceSpec{SourceID: "docs", SeedURL: server.URL + "/docs", ContentSelector: "main"}}, []string{server.URL + "/docs/guide.md"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if markdownCalls.Load() != 0 || len(artifact.Report.Skipped) != 1 || !artifact.Manifest.Complete {
+		t.Fatalf("calls=%d report=%+v complete=%t", markdownCalls.Load(), artifact.Report, artifact.Manifest.Complete)
+	}
+}
+
 func TestCrawlDiscoversNestedAnchorsWithoutContainerConfiguration(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/docs", func(w http.ResponseWriter, r *http.Request) {

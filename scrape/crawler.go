@@ -118,6 +118,10 @@ func CrawlTargets(ctx context.Context, cfg Config, initialURLs, knownSuccessfulU
 		if !accepted {
 			return corpus.Artifact{}, fmt.Errorf("initial URL outside seed scope: %s", rawURL)
 		}
+		if isMarkdownURL(canonical) {
+			artifact.Report.Skipped = append(artifact.Report.Skipped, corpus.PageEvent{URL: canonical, Detail: "Markdown resource"})
+			continue
+		}
 		if !queued[canonical] {
 			queued[canonical] = true
 			seen[canonical] = true
@@ -323,6 +327,9 @@ func (c *crawler) fetchPage(ctx context.Context, pageURL string) pageResult {
 		links[resolved] = accepted
 		if !accepted {
 			result.skipped = append(result.skipped, corpus.PageEvent{URL: resolved, Detail: "outside seed scope"})
+		} else if isMarkdownURL(resolved) {
+			links[resolved] = false
+			result.skipped = append(result.skipped, corpus.PageEvent{URL: resolved, Detail: "Markdown resource"})
 		}
 	})
 	for link, accepted := range links {
@@ -354,6 +361,15 @@ func (c *crawler) fetchPage(ctx context.Context, pageURL string) pageResult {
 		return result
 	}
 	return result
+}
+
+func isMarkdownURL(rawURL string) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	path := strings.ToLower(parsed.Path)
+	return strings.HasSuffix(path, ".md") || strings.HasSuffix(path, ".markdown")
 }
 
 func (c *crawler) do(ctx context.Context, pageURL string, result *pageResult) (*http.Response, error) {
