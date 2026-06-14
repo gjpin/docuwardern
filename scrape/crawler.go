@@ -1,11 +1,13 @@
 package scrape
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"sort"
@@ -118,10 +120,6 @@ func CrawlTargets(ctx context.Context, cfg Config, initialURLs, knownSuccessfulU
 		}
 		if !accepted {
 			return corpus.Artifact{}, fmt.Errorf("initial URL outside seed scope: %s", rawURL)
-		}
-		if isMarkdownURL(canonical) {
-			artifact.Report.Skipped = append(artifact.Report.Skipped, corpus.PageEvent{URL: canonical, Detail: "Markdown resource"})
-			continue
 		}
 		if !queued[canonical] {
 			queued[canonical] = true
@@ -298,11 +296,21 @@ func (c *crawler) fetchPage(ctx context.Context, pageURL string) pageResult {
 		return result
 	}
 	contentType := response.Header.Get("Content-Type")
-	if !strings.HasPrefix(strings.ToLower(contentType), "text/html") && !strings.HasPrefix(strings.ToLower(contentType), "application/xhtml+xml") {
-		result.err = fmt.Errorf("expected HTML response, got %q", contentType)
+	mediaType, decodeContentType, responseBody, htmlResponse := classifyResponseMediaType(response.Body, contentType)
+	if !htmlResponse {
+		event := corpus.PageEvent{URL: result.requested, StatusCode: result.status, Detail: fmt.Sprintf("non-HTML response: %q", mediaType)}
+		if result.finalURL != result.requested {
+			event.Target = result.finalURL
+		}
+		if result.requested == c.cfg.Source.SeedURL {
+			result.err = errors.New(event.Detail)
+		} else {
+			result.skipped = append(result.skipped, event)
+			result.ignored = true
+		}
 		return result
 	}
-	utf8Reader, err := charset.NewReader(response.Body, contentType)
+	utf8Reader, err := charset.NewReader(responseBody, decodeContentType)
 	if err != nil {
 		result.err = fmt.Errorf("decode response charset: %w", err)
 		return result
@@ -342,9 +350,6 @@ func (c *crawler) fetchPage(ctx context.Context, pageURL string) pageResult {
 		links[resolved] = accepted
 		if !accepted {
 			result.skipped = append(result.skipped, corpus.PageEvent{URL: resolved, Detail: "outside seed scope"})
-		} else if isMarkdownURL(resolved) {
-			links[resolved] = false
-			result.skipped = append(result.skipped, corpus.PageEvent{URL: resolved, Detail: "Markdown resource"})
 		}
 	})
 	for link, accepted := range links {
@@ -413,13 +418,18 @@ func immediateMetaRefreshTarget(doc *goquery.Document) (string, bool) {
 	return target, target != ""
 }
 
-func isMarkdownURL(rawURL string) bool {
-	parsed, err := url.Parse(rawURL)
-	if err != nil {
-		return false
+func classifyResponseMediaType(body io.Reader, contentType string) (string, string, io.Reader, bool) {
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	mediaType = strings.ToLower(mediaType)
+	if err == nil && mediaType != "application/octet-stream" {
+		return mediaType, contentType, body, mediaType == "text/html" || mediaType == "application/xhtml+xml"
 	}
-	path := strings.ToLower(parsed.Path)
-	return strings.HasSuffix(path, ".md") || strings.HasSuffix(path, ".markdown")
+
+	buffered := bufio.NewReaderSize(body, 512)
+	prefix, _ := buffered.Peek(512)
+	detected, _, _ := mime.ParseMediaType(http.DetectContentType(prefix))
+	detected = strings.ToLower(detected)
+	return detected, detected, buffered, detected == "text/html" || detected == "application/xhtml+xml"
 }
 
 func (c *crawler) do(ctx context.Context, pageURL string, result *pageResult) (*http.Response, error) {
@@ -428,6 +438,7 @@ func (c *crawler) do(ctx context.Context, pageURL string, result *pageResult) (*
 		return nil, err
 	}
 	req.Header.Set("User-Agent", c.cfg.UserAgent)
+	req.Header.Set("Accept", "text/html, application/xhtml+xml")
 	client := *c.client
 	baseCheck := client.CheckRedirect
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {

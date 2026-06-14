@@ -98,6 +98,38 @@ func TestRetryRetainsFailureAndReturnsError(t *testing.T) {
 	}
 }
 
+func TestRetryReplacesLegacyNonHTMLFailureWithSkip(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/octet-stream")
+		fmt.Fprint(w, "package docs")
+	}))
+	defer server.Close()
+
+	target := server.URL + "/docs/source.go"
+	artifact := incompleteArtifact(server.URL+"/docs", corpus.Report{Failed: []corpus.PageEvent{{
+		URL:        target,
+		StatusCode: http.StatusOK,
+		Detail:     `expected HTML response, got "application/octet-stream"`,
+	}}})
+	dir := filepath.Join(t.TempDir(), "artifact")
+	if err := corpus.Write(dir, artifact); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := Retry(context.Background(), dir, RetryOptions{MaxRetries: 3, MaxRetriesSet: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 1 || !result.Manifest.Complete || len(result.Report.Failed) != 0 || len(result.Report.Skipped) != 1 {
+		t.Fatalf("calls=%d complete=%v report=%+v", calls.Load(), result.Manifest.Complete, result.Report)
+	}
+	if event := result.Report.Skipped[0]; event.URL != target || event.StatusCode != http.StatusOK || event.Detail != `non-HTML response: "text/plain"` {
+		t.Fatalf("skip = %+v", event)
+	}
+}
+
 func TestRetryRedirectToExistingDocumentDoesNotDuplicate(t *testing.T) {
 	server := httptest.NewServer(nil)
 	server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

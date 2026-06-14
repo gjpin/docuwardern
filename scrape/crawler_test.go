@@ -98,10 +98,13 @@ func TestCrawlReportsFetchingProgressAtTenPercentBuckets(t *testing.T) {
 	}
 }
 
-func TestNonHTMLFailsWithoutRetry(t *testing.T) {
+func TestNonHTMLSeedFailsWithoutRetry(t *testing.T) {
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
+		if got := r.Header.Get("Accept"); got != "text/html, application/xhtml+xml" {
+			t.Errorf("Accept = %q", got)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{}`)
 	}))
@@ -113,25 +116,53 @@ func TestNonHTMLFailsWithoutRetry(t *testing.T) {
 	if calls.Load() != 1 {
 		t.Fatalf("calls = %d", calls.Load())
 	}
+	if event := artifact.Report.Failed[0]; event.StatusCode != http.StatusOK || event.Detail != `non-HTML response: "application/json"` {
+		t.Fatalf("failure = %+v", event)
+	}
 }
 
-func TestCrawlSkipsMarkdownLinksWithoutFetchingThem(t *testing.T) {
-	var markdownCalls atomic.Int32
+func TestNonHTMLSeedFailsAfterRedirect(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/docs", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/docs/download.pdf", http.StatusFound)
+	})
+	mux.HandleFunc("/docs/download.pdf", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/pdf")
+		fmt.Fprint(w, "%PDF-1.7\n")
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	seed := server.URL + "/docs"
+	artifact, err := Crawl(context.Background(), Config{Source: corpus.SourceSpec{SourceID: "docs", SeedURL: seed, ContentSelector: "main"}})
+	if err == nil || artifact.Manifest.Complete || len(artifact.Report.Failed) != 1 {
+		t.Fatalf("err=%v complete=%v report=%+v", err, artifact.Manifest.Complete, artifact.Report)
+	}
+	if event := artifact.Report.Failed[0]; event.URL != seed || event.StatusCode != http.StatusOK || event.Detail != `non-HTML response: "application/pdf"` {
+		t.Fatalf("failure = %+v", event)
+	}
+}
+
+func TestCrawlFetchesAndSkipsNonHTMLLinksByResponseType(t *testing.T) {
+	paths := []string{"guide.go", "client.ts", "config.lua", "readme.md", "download", "looks.html"}
+	calls := make(map[string]*atomic.Int32, len(paths))
 	mux := http.NewServeMux()
 	mux.HandleFunc("/docs", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
-		fmt.Fprint(w, `<main>Home</main><a href="/docs/guide.md">Markdown</a><a href="/docs/notes.MARKDOWN?raw=1">More Markdown</a><a href="/docs/page">Page</a>`)
+		fmt.Fprint(w, `<main>Home</main>`)
+		for _, path := range paths {
+			fmt.Fprintf(w, `<a href="/docs/%s">resource</a>`, path)
+		}
 	})
-	mux.HandleFunc("/docs/guide.md", func(w http.ResponseWriter, r *http.Request) {
-		markdownCalls.Add(1)
-	})
-	mux.HandleFunc("/docs/notes.MARKDOWN", func(w http.ResponseWriter, r *http.Request) {
-		markdownCalls.Add(1)
-	})
-	mux.HandleFunc("/docs/page", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html")
-		fmt.Fprint(w, `<main>Page</main>`)
-	})
+	for _, path := range paths {
+		path := path
+		calls[path] = &atomic.Int32{}
+		mux.HandleFunc("/docs/"+path, func(w http.ResponseWriter, r *http.Request) {
+			calls[path].Add(1)
+			w.Header().Set("Content-Type", "application/octet-stream")
+			fmt.Fprint(w, "not HTML")
+		})
+	}
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
@@ -139,23 +170,22 @@ func TestCrawlSkipsMarkdownLinksWithoutFetchingThem(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if markdownCalls.Load() != 0 {
-		t.Fatalf("Markdown requests = %d, want 0", markdownCalls.Load())
-	}
-	if len(artifact.Manifest.Documents) != 2 || len(artifact.Report.Skipped) != 2 || len(artifact.Report.Failed) != 0 {
+	if len(artifact.Manifest.Documents) != 1 || len(artifact.Report.Skipped) != len(paths) || len(artifact.Report.Failed) != 0 {
 		t.Fatalf("documents=%d report=%+v", len(artifact.Manifest.Documents), artifact.Report)
 	}
-	for _, skipped := range artifact.Report.Skipped {
-		if skipped.Detail != "Markdown resource" {
-			t.Fatalf("skip = %+v", skipped)
+	for _, path := range paths {
+		if calls[path].Load() != 1 {
+			t.Fatalf("%s calls = %d", path, calls[path].Load())
 		}
 	}
 }
 
-func TestCrawlTargetsSkipsMarkdownInitialURL(t *testing.T) {
-	var markdownCalls atomic.Int32
+func TestCrawlTargetsSkipsNonHTMLInitialURL(t *testing.T) {
+	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		markdownCalls.Add(1)
+		calls.Add(1)
+		w.Header().Set("Content-Type", "text/markdown")
+		fmt.Fprint(w, "# Guide")
 	}))
 	defer server.Close()
 
@@ -163,8 +193,79 @@ func TestCrawlTargetsSkipsMarkdownInitialURL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if markdownCalls.Load() != 0 || len(artifact.Report.Skipped) != 1 || !artifact.Manifest.Complete {
-		t.Fatalf("calls=%d report=%+v complete=%t", markdownCalls.Load(), artifact.Report, artifact.Manifest.Complete)
+	if calls.Load() != 1 || len(artifact.Report.Skipped) != 1 || !artifact.Manifest.Complete {
+		t.Fatalf("calls=%d report=%+v complete=%t", calls.Load(), artifact.Report, artifact.Manifest.Complete)
+	}
+	if event := artifact.Report.Skipped[0]; event.StatusCode != http.StatusOK || event.Detail != `non-HTML response: "text/markdown"` {
+		t.Fatalf("skip = %+v", event)
+	}
+}
+
+func TestSourceExtensionReturningHTMLIsProcessed(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprint(w, `<main>Generated documentation</main>`)
+	}))
+	defer server.Close()
+
+	artifact, err := Crawl(context.Background(), Config{Source: corpus.SourceSpec{SourceID: "docs", SeedURL: server.URL + "/docs/api.go", ContentSelector: "main"}})
+	if err != nil || len(artifact.Manifest.Documents) != 1 {
+		t.Fatalf("err=%v documents=%d report=%+v", err, len(artifact.Manifest.Documents), artifact.Report)
+	}
+}
+
+func TestResponseMediaTypeHandling(t *testing.T) {
+	tests := []struct {
+		name        string
+		contentType string
+		body        string
+		wantHTML    bool
+		wantType    string
+	}{
+		{name: "HTML parameters", contentType: "Text/HTML; Charset=UTF-8", body: `<main>HTML</main>`, wantHTML: true},
+		{name: "XHTML parameters", contentType: "Application/XHTML+XML; charset=utf-8", body: `<html xmlns="http://www.w3.org/1999/xhtml"><main>XHTML</main></html>`, wantHTML: true},
+		{name: "missing sniffed HTML", body: `<html><main>HTML</main></html>`, wantHTML: true},
+		{name: "malformed sniffed HTML", contentType: `broken;="`, body: `<html><main>HTML</main></html>`, wantHTML: true},
+		{name: "generic sniffed HTML", contentType: "application/octet-stream", body: `<html><main>HTML</main></html>`, wantHTML: true},
+		{name: "missing sniffed text", body: "plain text", wantType: "text/plain"},
+		{name: "malformed sniffed PDF", contentType: `broken;="`, body: "%PDF-1.7\n", wantType: "application/pdf"},
+		{name: "generic sniffed PNG", contentType: "application/octet-stream", body: "\x89PNG\r\n\x1a\n", wantType: "image/png"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/docs", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/html")
+				fmt.Fprint(w, `<main>Home</main><a href="/docs/resource">resource</a>`)
+			})
+			mux.HandleFunc("/docs/resource", func(w http.ResponseWriter, r *http.Request) {
+				if tt.contentType != "" {
+					w.Header().Set("Content-Type", tt.contentType)
+				} else {
+					w.WriteHeader(http.StatusOK)
+				}
+				fmt.Fprint(w, tt.body)
+			})
+			server := httptest.NewServer(mux)
+			defer server.Close()
+
+			artifact, err := Crawl(context.Background(), Config{Source: corpus.SourceSpec{SourceID: "docs", SeedURL: server.URL + "/docs", ContentSelector: "main"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.wantHTML {
+				if len(artifact.Manifest.Documents) != 2 || len(artifact.Report.Skipped) != 0 {
+					t.Fatalf("documents=%d report=%+v", len(artifact.Manifest.Documents), artifact.Report)
+				}
+				return
+			}
+			if len(artifact.Manifest.Documents) != 1 || len(artifact.Report.Skipped) != 1 {
+				t.Fatalf("documents=%d report=%+v", len(artifact.Manifest.Documents), artifact.Report)
+			}
+			if got := artifact.Report.Skipped[0].Detail; got != fmt.Sprintf(`non-HTML response: %q`, tt.wantType) {
+				t.Fatalf("detail = %q", got)
+			}
+		})
 	}
 }
 
