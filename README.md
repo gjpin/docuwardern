@@ -9,6 +9,8 @@ output reference.
 
 ## Table Of Contents
 
+- [Major Features](#major-features)
+- [Agent Skill](#agent-skill)
 - [Quick Starts](#quick-starts)
 - [Cloud Quick Start](#cloud-quick-start)
 - [Local Quick Start](#local-quick-start)
@@ -18,6 +20,31 @@ output reference.
 - [Validate The Index](#validate-the-index)
 - [Configuration](#configuration)
 - [Development](#development)
+
+## Major Features
+
+- Recursively crawls static documentation within a seed URL's origin and path
+  boundary, with concurrent workers, throttling, retries, and crawl reports.
+- Stores reusable Markdown artifacts so failed pages can be retried and
+  indexing can resume without repeating a successful crawl.
+- Creates heading-aware chunks that preserve source URLs, heading hierarchy,
+  code fences, and version metadata.
+- Combines dense semantic and sparse lexical retrieval in Qdrant, then reranks
+  and deduplicates results into prompt-ready Markdown or structured JSON.
+- Publishes versioned indexes through atomic Qdrant alias updates, reuses
+  compatible embeddings, and keeps the previous index active if publication
+  fails.
+- Supports local OpenAI- and Cohere-compatible model servers as well as Voyage
+  AI, with local or cloud-hosted Qdrant.
+- Provides source and document discovery commands plus an agent skill for
+  documentation-first technical research.
+
+## Agent Skill
+
+The bundled [Docuwarden documentation search skill](skills/docuwarden-docs/SKILL.md)
+instructs coding agents to discover indexed sources and search them with
+Docuwarden before falling back to the web. It is search-only and does not allow
+agents to scrape, ingest, or index documentation.
 
 ## Quick Starts
 
